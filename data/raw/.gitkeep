@@ -1,0 +1,17 @@
+# Placez vos fichiers de données brutes ici
+
+Ce dossier est destiné à contenir vos fichiers de données sources :
+- Fichiers clients (CSV, Excel, Parquet)
+- Fichiers d'interactions (CSV)
+- Tout autre fichier de données brut
+
+**Format recommandé pour les clients :**
+```
+client_id, age, anciennete_mois, chiffre_affaires, nb_transactions, segment, score_satisfaction
+```
+
+**Format recommandé pour les interactions :**
+```
+client_source, client_target, weight, type_interaction
+```
+

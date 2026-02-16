@@ -1,0 +1,66 @@
+# Configuration principale du projet
+
+# Paramètres des données
+data:
+  raw_path: "data/raw"
+  processed_path: "data/processed"
+  train_test_split: 0.8
+  random_state: 42
+
+# Paramètres du réseau
+network:
+  min_edge_weight: 0.1
+  directed: false
+  weighted: true
+
+# Métriques de centralité à calculer
+centrality_metrics:
+  - degree
+  - betweenness
+  - closeness
+  - eigenvector
+  - pagerank
+
+# Paramètres des modèles ML
+models:
+  algorithms:
+    - random_forest
+    - xgboost
+    - gradient_boosting
+
+  hyperparameters:
+    random_forest:
+      n_estimators: 100
+      max_depth: 10
+      min_samples_split: 2
+
+    xgboost:
+      n_estimators: 100
+      learning_rate: 0.1
+      max_depth: 6
+
+    gradient_boosting:
+      n_estimators: 100
+      learning_rate: 0.1
+      max_depth: 5
+
+# Paramètres de validation
+validation:
+  cv_folds: 5
+  scoring:
+    - r2
+    - mae
+    - mse
+
+# Visualisation
+visualization:
+  figsize: [12, 8]
+  style: "seaborn-v0_8-darkgrid"
+  color_palette: "viridis"
+
+# Paramètres de l'application Streamlit
+streamlit:
+  title: "Plateforme de Prédiction de Centralité Client"
+  page_icon: "📊"
+  layout: "wide"
+
