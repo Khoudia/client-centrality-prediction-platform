@@ -1,4 +1,18 @@
-# MÉMOIRE DE FIN D'ÉTUDES
+# -*- coding: utf-8 -*-
+"""
+Régénère MEMOIRE_MASTER_DATA_SCIENCE_2026.md avec les vraies statistiques
+du pipeline client-centrality-prediction-platform (Hôtel Aurore Paris),
+puis lance generate_memoire_word.py pour produire le DOCX.
+
+Usage : python _rebuild_memoire.py
+"""
+import sys, os
+from pathlib import Path
+
+BASE = Path(__file__).parent
+MD_OUT = BASE / "docs" / "MEMOIRE_MASTER_DATA_SCIENCE_2026.md"
+
+CONTENT = r'''# MÉMOIRE DE FIN D'ÉTUDES
 
 ---
 
@@ -933,3 +947,28 @@ validation:
 ---
 
 > *Ce mémoire a été rédigé en conformité avec le règlement du DU SDA de l'Université Paris-Sorbonne. Les données utilisées ont été mises à disposition par l'Hôtel Aurore Paris Gare de Lyon dans le cadre d'un partenariat de recherche et sont traitées conformément au RGPD.*
+'''
+
+# ── Écriture du fichier Markdown ──────────────────────────────────────────────
+print(f"[1/3] Écriture de {MD_OUT.name} ...")
+MD_OUT.write_text(CONTENT, encoding="utf-8")
+size_kb = MD_OUT.stat().st_size / 1024
+print(f"      OK — {size_kb:.1f} Ko, {CONTENT.count(chr(10))} lignes")
+
+# ── Lancement de la conversion Word ──────────────────────────────────────────
+print("[2/3] Lancement de generate_memoire_word.py ...")
+script = BASE / "generate_memoire_word.py"
+if not script.exists():
+    print(f"ERREUR : script introuvable : {script}")
+    sys.exit(1)
+
+# Import direct et appel de main()
+sys.path.insert(0, str(BASE))
+import importlib.util
+spec = importlib.util.spec_from_file_location("gen_word", str(script))
+gen_word = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gen_word)
+gen_word.main()
+
+print("[3/3] Terminé.")
+

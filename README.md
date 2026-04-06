@@ -1,7 +1,7 @@
 # 🏨 Hôtel Aurore Paris — Analyse Réseau & Satisfaction Client
 
 Plateforme d'analyse de données hôtelières basée sur les **vraies données** de l'Hôtel Aurore Paris Gare de Lyon.  
-**Master Data Science — Université Paris-Sorbonne — 2025-2026**
+**DU SDA — Université Paris-Sorbonne — 2025-2026**
 
 ---
 
@@ -18,28 +18,28 @@ Plateforme d'analyse de données hôtelières basée sur les **vraies données**
 
 ---
 
-## 📊 Résultats obtenus (données réelles — validés)
+## 📊 Résultats obtenus (données réelles — validés le 06/04/2026)
 
 | Indicateur | Valeur |
 |------------|--------|
 | Réservations chargées | **6 474** |
 | Clients uniques | **6 427** |
-| Avis Booking matchés | **1 098** (sur 1 634) |
+| Avis Booking matchés | **316** (sur 1 634) |
 | Avis Expedia | **208** |
-| Note moyenne Booking | **8.37 / 10** |
-| Haute satisfaction (≥8) | **904 clients** |
+| Note moyenne Booking | **7.58 / 10** |
+| Haute satisfaction (≥8) | **188 clients** |
 | Canaux principaux | Expedia Group 54%, Booking 36%, Other OTA 10% |
 | Chambres | Standard 52%, Supérieure 43%, Familiale 5% |
-| **Réseau — Nœuds** | **300** (sous-échantillonné) |
-| **Réseau — Arêtes** | **31 298** |
-| **Réseau — Densité** | **0.698** |
+| **Réseau — Nœuds** | **500** (validation complète) |
+| **Réseau — Arêtes** | **88 375** |
+| **Réseau — Densité** | **0.708** |
 | **Réseau — Modularité** | **0.205** |
-| **Modèle RF — Accuracy** | **91.5%** |
-| **Modèle GB — Accuracy** | **95.4%** ⭐ meilleur |
-| **ROC-AUC** | **96.8%** |
-| **CV 5-fold moyen** | **92.7%** |
+| **Modèle RF — Accuracy** | **85.8%** |
+| **Modèle GB — Accuracy** | **96.6%** ⭐ meilleur |
+| **ROC-AUC RF** | **91.8%** |
+| **CV 5-fold RF** | **91.5%** |
 
-**Top features prédictives** : channel_group (41%), pays (22%), langue (14%), is_cancelled (6%)
+**Top features prédictives observées** : `channel_group`, `pays`, `is_cancelled`, `lead_time_days`, `revenue`
 
 ---
 
@@ -51,8 +51,7 @@ client-centrality-prediction-platform/
 ├── requirements.txt                 # Dépendances Python
 ├── data-projet-sorbonne/            # ⚠️ Données brutes (non versionnées)
 │   ├── availpro_export.xlsx         # 6 500 réservations AvailPro
-│   ├── données avis traités.xlsx    # 1 634 avis Booking.com
-│   ├── données avis booking.csv     # CSV brut Booking (fallback)
+│   ├── données avis booking.csv     # 1 634 avis Booking.com (source unique)
 │   └── expediareviews_*.csv         # 208 avis Expedia (tab-séparé)
 ├── data/processed/                  # Datasets générés automatiquement
 │   └── hotel_dataset_final.csv      # Dataset principal (6 474 lignes, 82 cols)
@@ -71,14 +70,14 @@ client-centrality-prediction-platform/
 
 ### 1. Installation des dépendances
 
-```bash
+```powershell
 pip install -r requirements.txt
 ```
 
 ### 2. Lancement de l'application Streamlit
 
-```bash
-streamlit run app.py
+```powershell
+python -m streamlit run app.py
 ```
 
 → L'application démarre sur **http://localhost:8501**
@@ -86,7 +85,7 @@ streamlit run app.py
 ### 3. Pipeline automatique (recommandé)
 
 Dans la barre latérale, cliquez sur **"🚀 Tout exécuter (pipeline)"** pour :
-- Charger les 4 fichiers de données
+- Charger les 3 fichiers de données
 - Nettoyer et fusionner les données
 - Construire le graphe de similarité (800 nœuds max par défaut)
 - Calculer les métriques réseau (degree, betweenness, pagerank, eigenvector, closeness)
@@ -111,8 +110,7 @@ Dans la barre latérale, cliquez sur **"🚀 Tout exécuter (pipeline)"** pour :
 | Fichier | Source | Contenu |
 |---------|--------|---------|
 | `availpro_export.xlsx` | AvailPro / Channel Manager | Réservations, dates, canal, montant, chambre, client |
-| `données avis traités.xlsx` | Booking.com | 1 634 avis avec 6 sous-notes |
-| `données avis booking.csv` | Booking.com | CSV brut (fallback si xlsx absent) |
+| `données avis booking.csv` | Booking.com | 1 634 avis bruts (source unique, traitement dans le code) |
 | `expediareviews_from_*.csv` | Expedia | 208 avis tab-séparés format `X out of 10` |
 
 ---
@@ -161,14 +159,19 @@ Dans la barre latérale, cliquez sur **"🚀 Tout exécuter (pipeline)"** pour :
 
 ## 🧪 Commandes de test
 
-```bash
+```powershell
 # Test des imports
 python -c "from src.data.data_loader import build_final_dataset; print('data_loader OK')"
 python -c "from src.network.network_analyzer import NetworkAnalyzer; print('network OK')"
 python -c "from src.models.predictor import SatisfactionPredictor; print('predictor OK')"
 python -c "from src.visualization.visualizer import NetworkVisualizer; print('visualizer OK')"
 
-# Test pipeline complet (données réelles)
+# Tests unitaires
+python -m pytest -q tests
+
+# Tests pipeline (données réelles)
+python test_quick.py
+python validate_pipeline.py
 python run_pipeline_test.py
 # → résultats dans pipeline_test_results.txt
 
@@ -186,7 +189,7 @@ print('Pipeline démo OK')
 "
 
 # Lancer l'application
-streamlit run app.py
+python -m streamlit run app.py
 ```
 
 ---

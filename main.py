@@ -1,6 +1,4 @@
-"""
-Module principal de la plateforme de prédiction de centralité client.
-"""
+"""Point d’entrée léger pour le projet Hôtel Aurore Paris."""
 
 import sys
 from pathlib import Path
@@ -11,7 +9,7 @@ sys.path.append(str(Path(__file__).parent / "src"))
 from src.utils.logger import setup_logger
 from src.data.data_loader import DataLoader
 from src.network.network_analyzer import NetworkAnalyzer
-from src.models.predictor import CentralityPredictor
+from src.models.predictor import SatisfactionPredictor
 from src.visualization.visualizer import NetworkVisualizer
 
 logger = setup_logger(__name__)
@@ -19,28 +17,30 @@ logger = setup_logger(__name__)
 
 def main():
     """
-    Point d'entrée principal de l'application.
+    Point d'entrée principal du projet.
+    Réalise un smoke test des composants principaux puis invite à lancer Streamlit.
     """
-    logger.info("🚀 Démarrage de la plateforme de prédiction de centralité client")
+    logger.info("🚀 Démarrage de la plateforme Hôtel Aurore Paris")
 
     try:
         # 1. Chargement des données
-        logger.info("📊 Chargement des données...")
+        logger.info("📊 Initialisation du chargeur de données...")
         data_loader = DataLoader()
 
         # 2. Analyse du réseau
-        logger.info("🕸️  Analyse du réseau...")
+        logger.info("🕸️  Initialisation du module réseau...")
         network_analyzer = NetworkAnalyzer()
 
-        # 3. Prédiction de centralité
-        logger.info("🤖 Entraînement des modèles de prédiction...")
-        predictor = CentralityPredictor()
+        # 3. Modélisation de la satisfaction
+        logger.info("🤖 Initialisation du modèle de satisfaction...")
+        predictor = SatisfactionPredictor()
 
         # 4. Visualisation
-        logger.info("📈 Génération des visualisations...")
+        logger.info("📈 Initialisation du module de visualisation...")
         visualizer = NetworkVisualizer()
 
-        logger.info("✅ Processus terminé avec succès!")
+        logger.info("✅ Composants initialisés avec succès")
+        logger.info("➡️ Lancez l'application avec : python -m streamlit run app.py")
 
     except Exception as e:
         logger.error(f"❌ Erreur lors de l'exécution: {str(e)}")

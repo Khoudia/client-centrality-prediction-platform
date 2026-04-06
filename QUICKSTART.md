@@ -1,58 +1,121 @@
-# 🚀 QUICKSTART — Hôtel Aurore Paris
+# 🚀 QUICKSTART — Hôtel Aurore Paris · Analyse Réseau & Satisfaction Client
 
-## Prérequis
+> **DU SDA — Université Paris-Sorbonne — 2025-2026**
+> Pipeline validé le 06/04/2026 · Python 3.13 · Windows
 
-- Python 3.10+
-- Les 4 fichiers de données dans `data-projet-sorbonne/`
+---
 
-## Installation en 1 commande
+## ✅ État du projet (validé)
 
-```bash
+| Étape | Résultat |
+|-------|---------|
+| Chargement AvailPro | 6 474 réservations |
+| Parsing avis Booking | **1 634 avis** (format CSV encapsulé) |
+| Jointure avis ↔ réservations | **316 avis liés** via `reference_partenaire` |
+| Avis Expedia | 208 avis |
+| Note moyenne Booking | **7.58 / 10** |
+| Graphe de similarité | 500 nœuds · 88 375 arêtes |
+| Métriques réseau | degree · betweenness · pagerank · eigenvector · closeness |
+| Modèle satisfaction (RF) | **Accuracy 85.8% · F1 90.2% · ROC-AUC 91.8%** |
+| Validation croisée 5-fold | **91.5% ± 1.3%** |
+
+---
+
+## 📁 Fichiers sources
+
+```
+data-projet-sorbonne/
+├── availpro_export.xlsx                              ← Réservations (6 500 lignes)
+├── données avis booking.csv                          ← 1 634 avis Booking (source unique)
+└── expediareviews_from_2025-03-01_to_2026-03-01.csv ← 208 avis Expedia
+```
+
+> ⚠️ `données avis traités.xlsx` = doublon du CSV → **non utilisé**.
+
+---
+
+## 🛠️ Installation & Lancement
+
+```powershell
+# 1. Aller dans le projet
+cd "C:\Users\KFA24632\sda-2026\client-centrality-prediction-platform"
+
+# 2. Installer les dépendances
 pip install -r requirements.txt
+
+# 3. Diagnostic rapide (< 5 sec)
+$env:PYTHONUTF8="1"; python quick_diagnostic.py
+
+# 4. Test pipeline complet (60-90 sec) — résultats dans test_quick_result.txt
+$env:PYTHONUTF8="1"; python test_quick.py
+
+# 5. Validation complète (plus longue)
+$env:PYTHONUTF8="1"; python validate_pipeline.py
+
+# 6. Tests unitaires
+python -m pytest -q tests
+
+# 7. Lancer l'application (Windows — streamlit peut ne pas être dans le PATH)
+$env:PYTHONUTF8="1"; python -m streamlit run app.py
+# → http://localhost:8501
 ```
 
-## Lancer l'application
+---
 
-```bash
-streamlit run app.py
+## 🏗️ Architecture
+
+```
+src/data/data_loader.py        ← Chargement + nettoyage + fusion (3 sources)
+src/network/network_analyzer.py ← Graphe similarité + métriques + communautés
+src/models/predictor.py        ← SatisfactionPredictor (RF / GBT / XGBoost)
+src/visualization/visualizer.py ← 11 types de graphiques
+app.py                         ← Streamlit 7 pages
+data/processed/                ← Dataset final (généré automatiquement)
 ```
 
-→ http://localhost:8501
+---
 
-## Pipeline automatique
+## 📊 Variables dérivées clés
 
-Dans la barre latérale → **"🚀 Tout exécuter (pipeline)"**
+| Variable | Description |
+|----------|-------------|
+| `client_id` | SHA-256 de l'email (anonymisation RGPD) |
+| `lead_time_days` | Délai entre achat et arrivée |
+| `stay_length` | Durée du séjour (nuits) |
+| `channel_group` | booking / direct / expedia_group / metasearch / gds / other_ota |
+| `room_segment` | standard / superieure / suite / twin / double |
+| `amount_bucket` | Tranche de prix (<80€ → >600€) |
+| `has_review` / `review_score` | Avis lié + note /10 |
+| `high_satisfaction` | Note ≥ 8/10 (cible modèle) |
+| `pagerank`, `betweenness`… | Métriques réseau |
 
-Résultat attendu :
-- 6 474 réservations chargées
-- 1 098 avis Booking matchés
-- Note moyenne : 8.37/10
-- Modèle RF : Accuracy 91.7%, ROC-AUC 96.8%
+---
 
-## Test rapide en ligne de commande
+## 🎯 Modèle — Performances sur vraies données
 
-```bash
-# Générer le dataset final (données réelles)
-python -c "
-import logging; logging.basicConfig(level=logging.INFO)
-from src.data.data_loader import build_final_dataset
-df = build_final_dataset(save=True)
-print(f'OK — {len(df)} réservations, {df[\"has_review\"].sum()} avis matchés')
-"
-
-# Test pipeline complet avec log
-python run_pipeline_test.py
-# Résultats dans : pipeline_test_results.txt
+```
+Accuracy     : 85.79%
+F1-weighted  : 90.19%
+ROC-AUC      : 91.77%
+CV 5-fold    : 91.46% ± 1.29%
+Train size   : 5 179   |   Test size : 1 295
+Features     : 25 (numériques + catégorielles encodées + réseau)
 ```
 
-## Pages de l'application
+---
 
-| Page | Description |
-|------|-------------|
-| 🏠 Accueil | Tableau de bord global |
-| 📂 Chargement | Charger les 4 sources de données |
-| 🧹 Préparation | Nettoyer et fusionner les données |
-| 🕸️ Analyse Réseau | Graphe de similarité + métriques + communautés |
-| 🤖 Satisfaction | Modèle de prédiction RF/GB |
-| 📊 Visualisations | 11 graphiques interactifs |
-| 💾 Export | CSV/Excel + sauvegarde modèle |
+## 🐛 Corrections appliquées
+
+| Problème | Correction |
+|---------|-----------|
+| CSV Booking : 10 lignes au lieu de 1634 | Parser réécrit : détection par regex des dates |
+| Guillemets résiduels `""` dans les valeurs | Nettoyage `replace('""', '')` après parsing |
+| Jointure 0 match (`6.49e+09` vs `3044529099`) | Normalisation `str(int(float(x)))` des deux côtés |
+| `train()` sans argument `y` | Mode DataFrame complet ajouté : `train(df)` |
+| Double split dans `app.py` | Entraînement Streamlit aligné sur un seul découpage interne |
+| Doublons `centrality_*` dans les features | Alias exclus du dataset enrichi et du modèle |
+| `UnicodeEncodeError` Windows | `$env:PYTHONUTF8="1"` + `io.TextIOWrapper` |
+
+---
+
+*Mis à jour : 06/04/2026*

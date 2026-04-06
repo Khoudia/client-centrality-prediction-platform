@@ -1,107 +1,70 @@
-"""
-Script d'exemple pour tester rapidement la plateforme.
-"""
+"""Script de démonstration rapide du pipeline hôtelier en mode échantillon."""
 
 import sys
 from pathlib import Path
+
 sys.path.append(str(Path(__file__).parent))
 
 from src.data.data_loader import DataLoader
 from src.network.network_analyzer import NetworkAnalyzer
-from src.models.predictor import CentralityPredictor
+from src.models.predictor import SatisfactionPredictor
 from src.visualization.visualizer import NetworkVisualizer
 from src.utils.logger import setup_logger
-from sklearn.model_selection import train_test_split
 
 logger = setup_logger(__name__)
 
 
 def main():
-    """
-    Exemple d'utilisation complète de la plateforme.
-    """
-    logger.info("=== DÉMO DE LA PLATEFORME ===\n")
+    """Exécute une démonstration complète en mode démo, sans données réelles."""
+    logger.info("=== DÉMO HÔTEL Aurore Paris — Mode échantillon ===\n")
 
-    # 1. GÉNÉRATION DES DONNÉES D'EXEMPLE
-    logger.info("1️⃣ Génération des données d'exemple...")
     loader = DataLoader()
-    df_clients = loader.generate_sample_data(n_clients=100)
-    df_interactions = loader.generate_sample_interactions(n_interactions=500)
-    logger.info(f"   ✓ {len(df_clients)} clients générés")
-    logger.info(f"   ✓ {len(df_interactions)} interactions générées\n")
+    df_clients = loader.generate_sample_data(n_clients=120)
+    logger.info(f"1️⃣ Données de démo générées : {len(df_clients)} lignes")
 
-    # 2. CONSTRUCTION ET ANALYSE DU RÉSEAU
-    logger.info("2️⃣ Construction et analyse du réseau...")
     analyzer = NetworkAnalyzer()
-    graph = analyzer.build_network(df_interactions)
-
+    graph = analyzer.build_similarity_graph(df_clients, min_similarity=0.3, max_nodes=120)
+    communities = analyzer.detect_communities(method="greedy")
+    df_metrics = analyzer.compute_network_metrics()
+    df_enriched = analyzer.export_network_results(df_clients)
     stats = analyzer.get_network_statistics()
-    logger.info(f"   ✓ Réseau construit: {stats['nb_nodes']} nœuds, {stats['nb_edges']} arêtes")
-    logger.info(f"   ✓ Densité: {stats['density']:.4f}")
-    logger.info(f"   ✓ Clustering moyen: {stats['avg_clustering']:.4f}\n")
 
-    # 3. CALCUL DES MÉTRIQUES DE CENTRALITÉ
-    logger.info("3️⃣ Calcul des métriques de centralité...")
-    centrality_metrics = analyzer.calculate_all_centralities()
-    centrality_df = analyzer.get_centrality_dataframe()
-    logger.info(f"   ✓ {len(centrality_metrics)} métriques calculées")
-
-    # Top 5 clients par centralité de degré
-    top_5 = centrality_df.nlargest(5, 'centrality_degree')
-    logger.info("\n   Top 5 clients (centralité de degré):")
-    for _, row in top_5.iterrows():
-        logger.info(f"      • {row['node_id']}: {row['centrality_degree']:.4f}")
-    logger.info("")
-
-    # 4. ENTRAÎNEMENT DES MODÈLES
-    logger.info("4️⃣ Entraînement des modèles prédictifs...")
-    predictor = CentralityPredictor(model_type='random_forest')
-
-    # Préparer les features
-    X, y = predictor.prepare_features(df_clients, centrality_df)
-    logger.info(f"   ✓ Features préparées: {X.shape}")
-
-    # Split train/test
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
+    logger.info(
+        "2️⃣ Réseau : %s nœuds | %s arêtes | densité=%s | communautés=%s",
+        graph.number_of_nodes(),
+        graph.number_of_edges(),
+        stats.get("density"),
+        len(set(communities.values())) if communities else 0,
     )
 
-    # Entraîner
-    training_scores = predictor.train(X_train, y_train)
-    logger.info("\n   Scores d'entraînement (validation croisée):")
-    if training_scores.get('cv_r2_mean') is not None:
-        logger.info(f"      • R² = {training_scores['cv_r2_mean']:.4f} "
-                   f"(+/- {training_scores['cv_r2_std']:.4f})")
-    else:
-        logger.info(f"      • R² train = {training_scores['train_score']:.4f}")
-        logger.info(f"      • R² test = {training_scores['test_score']:.4f}")
+    top_5 = df_metrics.nlargest(5, "pagerank")[["client_id", "pagerank"]]
+    logger.info("3️⃣ Top 5 profils centraux (PageRank) :")
+    for _, row in top_5.iterrows():
+        logger.info("   • %s : %.4f", row["client_id"], row["pagerank"])
 
-    # 5. ÉVALUATION
-    logger.info("\n5️⃣ Évaluation sur l'ensemble de test...")
-    eval_results = predictor.evaluate(X_test, y_test)
-    logger.info("\n   Résultats sur le test:")
-    logger.info(f"      • R² = {eval_results['r2']:.4f}")
-    logger.info(f"      • RMSE = {eval_results['rmse']:.4f}")
-    logger.info(f"      • MAE = {eval_results['mae']:.4f}")
+    predictor = SatisfactionPredictor(model_type="random_forest", task="classification")
+    X, y = predictor.prepare_features(df_enriched)
+    results = predictor.train(X, y, validation=True)
+    logger.info("4️⃣ Modèle satisfaction : %s", results)
 
-    # 6. IMPORTANCE DES FEATURES
-    logger.info("\n6️⃣ Analyse de l'importance des features...")
-    target = 'centrality_degree'
-    importance_df = predictor.get_feature_importance(target, top_n=5)
-    logger.info(f"\n   Top 5 features pour {target}:")
-    for _, row in importance_df.iterrows():
-        logger.info(f"      • {row['feature']}: {row['importance']:.4f}")
+    importance_df = predictor.get_feature_importance(top_n=5)
+    if not importance_df.empty:
+        logger.info("5️⃣ Top 5 variables explicatives :")
+        for _, row in importance_df.iterrows():
+            logger.info("   • %s : %.4f", row["feature"], row["importance"])
 
-    # 7. SAUVEGARDE
-    logger.info("\n7️⃣ Sauvegarde des modèles...")
-    predictor.save_models(prefix='demo_model')
-    logger.info("   ✓ Modèles sauvegardés dans le dossier 'models/'\n")
+    viz = NetworkVisualizer()
+    viz.plot_network(graph, communities=communities, save=True)
+    viz.plot_centrality_distribution(df_metrics, save=True)
+    viz.plot_feature_importance(importance_df, save=True)
+    logger.info("6️⃣ Figures sauvegardées dans outputs/figures/")
 
-    logger.info("=== DÉMO TERMINÉE AVEC SUCCÈS ===")
-    logger.info("\nPour aller plus loin:")
-    logger.info("  • Lancez l'application web: streamlit run app.py")
-    logger.info("  • Explorez les notebooks dans 'notebooks/'")
-    logger.info("  • Consultez la documentation dans 'docs/'\n")
+    predictor.save_models(prefix="demo_model")
+    logger.info("7️⃣ Modèle sauvegardé dans models/")
+
+    logger.info("\n=== DÉMO TERMINÉE AVEC SUCCÈS ===")
+    logger.info("• Lancer l'application : python -m streamlit run app.py")
+    logger.info("• Exécuter les validations : python test_quick.py")
 
 
 if __name__ == '__main__':

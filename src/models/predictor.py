@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from sklearn.base import clone
 from sklearn.ensemble import (
     GradientBoostingClassifier,
     GradientBoostingRegressor,
@@ -41,12 +42,14 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.model_selection import cross_val_score, train_test_split
+from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 try:
     import xgboost as xgb
     HAS_XGBOOST = True
 except ImportError:
+    xgb = None  # type: ignore[assignment]
     HAS_XGBOOST = False
 
 logger = logging.getLogger(__name__)
@@ -87,6 +90,9 @@ _LEAKAGE_COLS = {
     "has_review", "commentaire_positif", "commentaire_negatif",
     "reponse_etablissement", "titre_commentaire",
     "source", "date_commentaire",
+    # Alias rétrocompatibilité à exclure pour éviter les doublons
+    "centrality_degree", "centrality_betweenness", "centrality_closeness",
+    "centrality_eigenvector", "centrality_pagerank",
     # Colonnes financières redondantes / à fuite
     "garantie", "montant_total",
     # Colonnes AvailPro sans valeur prédictive (binaires constantes ou admin)
@@ -134,10 +140,10 @@ def _select_features(
         Tuple (num_features, cat_features)
     """
     # Normaliser _LEAKAGE_COLS en minuscule pour la comparaison
-    exclude_norm = {c.lower().strip() for c in _LEAKAGE_COLS}
+    exclude_norm = {str(c).lower().strip() for c in _LEAKAGE_COLS}
     if extra_exclude:
-        exclude_norm.update(c.lower().strip() for c in extra_exclude)
-    exclude_norm.add(target_col.lower().strip())
+        exclude_norm.update(str(c).lower().strip() for c in extra_exclude)
+    exclude_norm.add(str(target_col).lower().strip())
 
     def _is_excluded(col: str) -> bool:
         return col.lower().strip() in exclude_norm
@@ -278,23 +284,32 @@ class SatisfactionPredictor:
         """
         target = target_col or self._target_col
 
+        df_work = df.copy()
+
         # Vérifier que la cible existe
         if target not in df.columns:
-            # Fallback : chercher la première colonne disponible
-            for alt in ["review_score", "note_globale", "high_satisfaction",
-                        "note_composite", "satisfaction_norm"]:
-                if alt in df.columns and df[alt].notna().sum() > 10:
-                    target = alt
-                    logger.warning(f"Cible '{self._target_col}' absente → fallback '{target}'")
-                    break
-            else:
-                raise ValueError(
-                    f"Aucune colonne cible trouvée. "
-                    f"Attendues : review_score / high_satisfaction"
+            if self.task == "classification" and "review_score" in df.columns and df["review_score"].notna().sum() > 10:
+                target = "_derived_high_satisfaction"
+                df_work[target] = (pd.to_numeric(df_work["review_score"], errors="coerce") >= 8.0).astype(int)
+                logger.warning(
+                    "Cible 'high_satisfaction' absente → variable dérivée depuis 'review_score'."
                 )
+            # Fallback : chercher la première colonne disponible
+            if target not in df_work.columns:
+                for alt in ["review_score", "note_globale", "high_satisfaction",
+                            "note_composite", "satisfaction_norm"]:
+                    if alt in df_work.columns and df_work[alt].notna().sum() > 10:
+                        target = alt
+                        logger.warning(f"Cible '{self._target_col}' absente → fallback '{target}'")
+                        break
+                else:
+                    raise ValueError(
+                        f"Aucune colonne cible trouvée. "
+                        f"Attendues : review_score / high_satisfaction"
+                    )
 
         # Filtrer les lignes avec cible non nulle
-        df_valid = df[df[target].notna()].copy()
+        df_valid = df_work[df_work[target].notna()].copy()
         if len(df_valid) < 20:
             raise ValueError(
                 f"Trop peu d'observations avec {target} renseigné "
@@ -325,65 +340,121 @@ class SatisfactionPredictor:
         )
         return X, y
 
+    def _should_stratify(self, y: pd.Series) -> bool:
+        """Retourne True si le stratify est applicable en classification."""
+        if self.task != "classification":
+            return False
+        try:
+            counts = y.value_counts(dropna=False)
+        except Exception:
+            return False
+        return y.nunique() > 1 and not counts.empty and counts.min() >= 2
+
+    def _update_feature_importances(self, n_features: int) -> None:
+        """Met à jour le tableau d'importance des variables si disponible."""
+        if not hasattr(self.model, "feature_importances_"):
+            self.feature_importances = None
+            return
+
+        feat_names = (
+            self.feature_names
+            if self.feature_names
+            else [f"feature_{i}" for i in range(n_features)]
+        )
+        self.feature_importances = pd.DataFrame({
+            "feature": feat_names,
+            "importance": self.model.feature_importances_,
+        }).sort_values("importance", ascending=False)
+
+    def fit(self, X_train: pd.DataFrame, y_train: pd.Series) -> None:
+        """Entraîne le modèle sur un jeu déjà découpé sans re-spliter les données."""
+        if len(X_train) < 2:
+            raise ValueError("Jeu d'entraînement insuffisant pour ajuster le modèle.")
+        self.scaler.fit(X_train)
+        X_train_scaled = self.scaler.transform(X_train)
+        self.model.fit(X_train_scaled, y_train)
+        self._update_feature_importances(X_train.shape[1])
+
     # ------------------------------------------------------------------
     # Entraînement
     # ------------------------------------------------------------------
 
     def train(
         self,
-        X: pd.DataFrame,
-        y: pd.Series,
+        X,
+        y: Optional[pd.Series] = None,
         test_size: float = 0.2,
         validation: bool = True,
+        target_col: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Entraîne le modèle et évalue ses performances.
 
+        Modes d'appel :
+          - predictor.train(X, y)          : X=features DataFrame, y=Series cible
+          - predictor.train(df)            : df=DataFrame complet (auto-préparation)
+          - predictor.train(df, target_col="ma_cible")  : idem avec cible explicite
+
         Args:
-            X          : Features
-            y          : Cible
+            X          : Features DataFrame OU DataFrame complet (si y=None)
+            y          : Série cible (optionnelle si X est le DataFrame complet)
             test_size  : Proportion du jeu de test
             validation : Si True, effectue une validation croisée 5-fold
+            target_col : Nom de la colonne cible (utilisé si X est DataFrame complet)
 
         Returns:
             Dictionnaire de métriques.
         """
+        # Mode "DataFrame complet" : X est un DataFrame, y n'est pas fourni
+        if y is None and isinstance(X, pd.DataFrame):
+            try:
+                X_prep, y_prep = self.prepare_features(X, target_col=target_col)
+            except ValueError as e:
+                logger.warning(f"Préparation features impossible : {e}")
+                return {}
+            return self.train(X_prep, y_prep, test_size=test_size,
+                              validation=validation)
+
+        # Mode standard : X et y fournis
         logger.info(f"Entraînement du modèle {self.model_type} ({self.task})…")
+
+        if len(X) < 20:
+            logger.warning(f"Trop peu d'observations ({len(X)}) pour entraîner le modèle.")
+            return {}
+
+        if self.task == "classification" and getattr(y, "nunique", lambda: 0)() < 2:
+            logger.warning("Une seule classe présente dans la cible — entraînement impossible.")
+            return {}
 
         X_tr, X_te, y_tr, y_te = train_test_split(
             X, y, test_size=test_size, random_state=self.random_state,
-            stratify=y if self.task == "classification" and y.nunique() < 10 else None,
+            stratify=y if self._should_stratify(y) else None,
         )
 
-        X_tr_s = self.scaler.fit_transform(X_tr)
+        self.fit(X_tr, y_tr)
         X_te_s = self.scaler.transform(X_te)
-
-        self.model.fit(X_tr_s, y_tr)
 
         results = self._evaluate_internal(X_te_s, y_te)
         results["train_set_size"] = len(X_tr)
         results["test_set_size"] = len(X_te)
         results["model_type"] = self.model_type
         results["task"] = self.task
-        results["n_features"] = len(self.feature_names)
+        results["n_features"] = len(self.feature_names) if self.feature_names else X_tr.shape[1]
 
-        if validation:
+        if validation and len(X_tr) >= 50:
             cv_scoring = "f1_weighted" if self.task == "classification" else "r2"
             try:
+                cv_folds = min(5, max(2, len(X_tr) // 10))
+                cv_model = make_pipeline(StandardScaler(), clone(self.model))
                 cv_scores = cross_val_score(
-                    self.model, X_tr_s, y_tr, cv=5, scoring=cv_scoring
+                    cv_model, X_tr, y_tr, cv=cv_folds,
+                    scoring=cv_scoring
                 )
                 results["cv_mean"] = round(float(cv_scores.mean()), 4)
                 results["cv_std"] = round(float(cv_scores.std()), 4)
             except Exception as e:
                 logger.warning(f"Validation croisée échouée : {e}")
 
-        # Importance des features
-        if hasattr(self.model, "feature_importances_"):
-            self.feature_importances = pd.DataFrame({
-                "feature": self.feature_names,
-                "importance": self.model.feature_importances_,
-            }).sort_values("importance", ascending=False)
 
         self.evaluation_results = results
         logger.info(f"Résultats : {results}")

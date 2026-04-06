@@ -248,6 +248,19 @@ def compute_network_metrics(G: nx.Graph) -> pd.DataFrame:
     """
     logger.info(f"Calcul des métriques réseau pour {G.number_of_nodes()} nœuds…")
 
+    if G.number_of_nodes() == 0:
+        logger.warning("Graphe vide — aucune métrique calculable.")
+        return pd.DataFrame(
+            columns=[
+                "client_id",
+                "weighted_degree",
+                "betweenness",
+                "pagerank",
+                "eigenvector",
+                "closeness",
+            ]
+        )
+
     results: Dict[str, Dict] = {}
 
     # 1. Weighted degree (strength)
@@ -315,6 +328,10 @@ def detect_communities(G: nx.Graph, method: str = "greedy") -> Dict[str, int]:
         Dictionnaire {client_id: community_id}.
     """
     logger.info(f"Détection de communautés (méthode={method})…")
+
+    if G.number_of_nodes() == 0:
+        logger.warning("Graphe vide — aucune communauté à détecter.")
+        return {}
 
     from networkx.algorithms import community as nx_comm
 
@@ -402,8 +419,16 @@ class NetworkAnalyzer:
     tout en exposant les nouvelles fonctions.
     """
 
-    def __init__(self, graph: Optional[nx.Graph] = None):
-        self.graph: nx.Graph = graph or nx.Graph()
+    def __init__(
+        self,
+        graph: Optional[nx.Graph] = None,
+        directed: bool = False,
+        weighted: bool = True,
+    ):
+        self.directed = directed
+        self.weighted = weighted
+        default_graph = nx.DiGraph() if directed else nx.Graph()
+        self.graph: nx.Graph = graph or default_graph
         self.centrality_metrics: Dict[str, Dict] = {}
         self.network_stats: Dict = {}
         self._communities: Dict[str, int] = {}
@@ -444,6 +469,19 @@ class NetworkAnalyzer:
     def export_network_results(self, df: pd.DataFrame) -> pd.DataFrame:
         """Retourne le dataset enrichi avec métriques et communautés."""
         df_metrics = self.get_centrality_dataframe()
+        keep_cols = [
+            c for c in df_metrics.columns
+            if c in {
+                "client_id",
+                "weighted_degree",
+                "degree",
+                "betweenness",
+                "closeness",
+                "eigenvector",
+                "pagerank",
+            }
+        ]
+        df_metrics = df_metrics[keep_cols].copy()
         return export_network_results(df, df_metrics, self._communities)
 
     # ------------------------------------------------------------------
@@ -462,7 +500,7 @@ class NetworkAnalyzer:
         Conservé pour la rétrocompatibilité / mode démo.
         """
         logger.info(f"Construction du graphe depuis {len(df_interactions)} interactions…")
-        self.graph = nx.Graph()
+        self.graph = nx.DiGraph() if self.directed else nx.Graph()
         for _, row in df_interactions.iterrows():
             src = row.get(source_col)
             tgt = row.get(target_col)

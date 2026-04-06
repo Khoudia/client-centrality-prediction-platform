@@ -29,7 +29,9 @@ class TestDataLoader:
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 50
         assert 'client_id' in df.columns
-        assert 'chiffre_affaires' in df.columns
+        assert 'revenue' in df.columns
+        assert 'amount_bucket' in df.columns
+        assert 'high_satisfaction' in df.columns
 
     def test_generate_sample_interactions(self):
         """Test la génération d'interactions d'exemple"""

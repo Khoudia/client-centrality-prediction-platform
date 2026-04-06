@@ -15,6 +15,7 @@ Pages :
 import sys
 import io
 import logging
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -70,6 +71,26 @@ def _ss(key: str, default=None):
 
 def _set(key: str, value):
     st.session_state[key] = value
+
+
+def _first_available_df(*keys: str):
+    """Retourne le premier DataFrame disponible en session_state."""
+    for key in keys:
+        value = _ss(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _load_uploaded_with_loader(uploaded_file, suffix: str, loader_func):
+    """Passe un fichier uploadé par un parseur robuste basé sur un chemin temporaire."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(uploaded_file.getbuffer())
+        tmp_path = Path(tmp.name)
+    try:
+        return loader_func(tmp_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def _df_to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -169,7 +190,7 @@ if st.sidebar.button("Tout exécuter (pipeline)"):
 st.sidebar.markdown("---")
 st.sidebar.info(
     "**Données** : AvailPro · Booking · Expedia\n\n"
-    "Master Data Science 2025-2026"
+    "DU SDA 2025-2026"
 )
 
 # =============================================================================
@@ -207,8 +228,7 @@ if page == "🏠 Accueil":
 | Fichier | Contenu |
 |---------|---------|
 | `availpro_export.xlsx` | ~6 500 réservations |
-| `données avis traités.xlsx` | 1 634 avis Booking |
-| `données avis booking.csv` | CSV brut Booking |
+| `données avis booking.csv` | 1 634 avis Booking (CSV brut) |
 | `expediareviews_*.csv` | 208 avis Expedia |
         """)
 
@@ -297,7 +317,6 @@ elif page == "📂 Chargement des données":
 
         files = {
             "AvailPro (réservations)": _RAW_DIR / "availpro_export.xlsx",
-            "Avis Booking (Excel traité)": _RAW_DIR / "données avis traités.xlsx",
             "Avis Booking (CSV brut)": _RAW_DIR / "données avis booking.csv",
             "Avis Expedia": _RAW_DIR / "expediareviews_from_2025-03-01_to_2026-03-01.csv",
         }
@@ -348,26 +367,33 @@ elif page == "📂 Chargement des données":
     with tab_upload:
         st.info("Uploadez vos propres fichiers si les fichiers locaux ne sont pas disponibles.")
         up_res = st.file_uploader("Réservations (xlsx)", type=["xlsx", "xls"], key="up_res")
-        up_bk  = st.file_uploader("Avis Booking (xlsx ou csv)", type=["xlsx", "csv"], key="up_bk")
+        up_bk  = st.file_uploader("Avis Booking (csv brut)", type=["csv"], key="up_bk")
         up_ex  = st.file_uploader("Avis Expedia (csv)", type=["csv"], key="up_ex")
 
         if up_res:
-            df = pd.read_excel(up_res, engine="openpyxl")
-            _set("df_raw_res", df)
-            st.success(f"✅ Réservations uploadées : {len(df):,} lignes")
+            try:
+                df = _load_uploaded_with_loader(up_res, Path(up_res.name).suffix or ".xlsx", load_availpro_data)
+                _set("df_raw_res", df)
+                st.success(f"✅ Réservations uploadées : {len(df):,} lignes")
+            except Exception as e:
+                st.error(f"Erreur upload réservations : {e}")
 
         if up_bk:
-            if up_bk.name.endswith(".xlsx"):
-                df = pd.read_excel(up_bk, engine="openpyxl")
-            else:
-                df = pd.read_csv(up_bk, sep=None, engine="python", encoding="utf-8")
-            _set("df_raw_booking", df)
-            st.success(f"✅ Avis Booking uploadés : {len(df):,} lignes")
+            try:
+                suffix = Path(up_bk.name).suffix or ".csv"
+                df = _load_uploaded_with_loader(up_bk, suffix, load_booking_reviews)
+                _set("df_raw_booking", df)
+                st.success(f"✅ Avis Booking uploadés : {len(df):,} lignes")
+            except Exception as e:
+                st.error(f"Erreur upload Booking : {e}")
 
         if up_ex:
-            df = pd.read_csv(up_ex, sep="\t", encoding="utf-8")
-            _set("df_raw_expedia", df)
-            st.success(f"✅ Avis Expedia uploadés : {len(df):,} lignes")
+            try:
+                df = _load_uploaded_with_loader(up_ex, Path(up_ex.name).suffix or ".csv", load_expedia_reviews)
+                _set("df_raw_expedia", df)
+                st.success(f"✅ Avis Expedia uploadés : {len(df):,} lignes")
+            except Exception as e:
+                st.error(f"Erreur upload Expedia : {e}")
 
     # Récapitulatif
     st.markdown("---")
@@ -626,8 +652,13 @@ elif page == "🕸️ Analyse Réseau":
                                 if c in df_enr.columns]
                     agg_dict = {c: "mean" for c in num_cols}
                     agg_dict["client_id"] = "count"
+
+                    def _mode_val(x):
+                        vc = x.value_counts()
+                        return vc.index[0] if len(vc) > 0 else "?"
+
                     for cc in cat_cols:
-                        agg_dict[cc] = lambda x: x.value_counts().index[0] if len(x) > 0 else "?"
+                        agg_dict[cc] = _mode_val
 
                     summary = df_enr.groupby("community_id").agg(agg_dict).round(2)
                     summary.columns = [c.replace("client_id", "n_clients") for c in summary.columns]
@@ -639,7 +670,7 @@ elif page == "🕸️ Analyse Réseau":
 elif page == "🤖 Satisfaction & Modélisation":
     st.header("🤖 Modélisation de la Satisfaction Client")
 
-    df_model = _ss("df_enriched") or _ss("df_final")
+    df_model = _first_available_df("df_enriched", "df_final")
     if df_model is None:
         st.warning("⚠️ Construisez d'abord le dataset final (page **Préparation & Nettoyage**).")
         st.stop()
@@ -693,28 +724,26 @@ elif page == "🤖 Satisfaction & Modélisation":
                 try:
                     pred = SatisfactionPredictor(model_type=model_type, task=task_type)
                     X, y = pred.prepare_features(df_model)
-                    from sklearn.model_selection import train_test_split
-                    X_tr, X_te, y_tr, y_te = train_test_split(
-                        X, y, test_size=test_size, random_state=42,
-                        stratify=y if task_type == "classification" and y.nunique() < 10 else None,
-                    )
-                    results = pred.train(X_tr, y_tr, test_size=test_size, validation=do_cv)
-                    eval_res = pred.evaluate(X_te, y_te)
+                    results = pred.train(X, y, test_size=test_size, validation=do_cv)
+                    eval_res = results.copy()
 
                     _set("predictor_obj", pred)
-                    _set("X_train", X_tr)
-                    _set("X_test", X_te)
-                    _set("y_train", y_tr)
-                    _set("y_test", y_te)
+                    _set("X_train", None)
+                    _set("X_test", None)
+                    _set("y_train", None)
+                    _set("y_test", None)
                     _set("eval_results", {**results, **eval_res})
 
                     st.success("✅ Modèle entraîné avec succès !")
                     st.markdown("#### Métriques d'évaluation")
                     kpi_items = {k: v for k, v in eval_res.items()
                                  if isinstance(v, (int, float)) and v is not None}
-                    kpi_cols = st.columns(len(kpi_items))
-                    for col, (k, v) in zip(kpi_cols, kpi_items.items()):
-                        col.metric(k.replace("_", " ").upper(), f"{v:.4f}")
+                    if kpi_items:
+                        kpi_cols = st.columns(len(kpi_items))
+                        for col, (k, v) in zip(kpi_cols, kpi_items.items()):
+                            col.metric(k.replace("_", " ").upper(), f"{v:.4f}")
+                    else:
+                        st.warning("Aucune métrique calculable pour cette configuration.")
 
                 except Exception as e:
                     st.error(f"Erreur : {e}")
@@ -760,7 +789,7 @@ elif page == "🤖 Satisfaction & Modélisation":
         if st.button("⚡ Comparer tous les modèles", key="btn_compare"):
             with st.spinner("Comparaison Random Forest vs Gradient Boosting…"):
                 try:
-                    df_m2 = _ss("df_enriched") or _ss("df_final")
+                    df_m2 = _first_available_df("df_enriched", "df_final")
                     pred2 = SatisfactionPredictor(task=current_task)
                     X2, y2 = pred2.prepare_features(df_m2)
                     multi_res = pred2.train_all_models(X2, y2)
@@ -792,7 +821,7 @@ elif page == "🤖 Satisfaction & Modélisation":
 elif page == "📊 Visualisations":
     st.header("📊 Visualisations")
 
-    df_viz = _ss("df_enriched") or _ss("df_final")
+    df_viz = _first_available_df("df_enriched", "df_final")
     if df_viz is None:
         st.warning("⚠️ Construisez d'abord le dataset (page Préparation) et/ou le réseau.")
         st.stop()
@@ -955,7 +984,7 @@ st.markdown("---")
 st.markdown(
     "<div style='text-align:center; color:#888; font-size:0.85rem;'>"
     "🏨 Hôtel Aurore Paris Gare de Lyon — Analyse Réseau & Satisfaction Client "
-    "| Master Data Science 2025-2026"
+    "| DU SDA 2025-2026"
     "</div>",
     unsafe_allow_html=True,
 )

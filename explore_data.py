@@ -49,11 +49,10 @@ def explore_file(path, file_type="csv", sep=",", encoding="utf-8"):
         traceback.print_exc()
         return None
 
-# Explorer tous les fichiers
+# Explorer tous les fichiers (données avis traités.xlsx supprimé — doublon du CSV brut)
 files = {
     "availpro_export.xlsx": {"type": "xlsx"},
     "données avis booking.csv": {"type": "csv", "sep": ";"},
-    "données avis traités.xlsx": {"type": "xlsx"},
     "expediareviews_from_2025-03-01_to_2026-03-01.csv": {"type": "csv"},
 }
 

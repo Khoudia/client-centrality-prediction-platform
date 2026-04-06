@@ -20,24 +20,9 @@ try:
 except Exception as e:
     print(f"ERREUR : {e}")
 
-# ── Booking avis traités ──────────────────────────────────────────────────────
+# ── Booking avis CSV (source unique — données avis traités.xlsx supprimé car doublon) ──
 print("\n" + "=" * 60)
-print("AVIS BOOKING (Excel traité)")
-print("=" * 60)
-try:
-    df2 = pd.read_excel(f"{RAW}/données avis traités.xlsx", engine="openpyxl")
-    print(f"Shape : {df2.shape}")
-    print("Colonnes :")
-    for c in df2.columns:
-        print(f"  {repr(c)}")
-    print("\nPremières lignes :")
-    print(df2.head(3).to_string())
-except Exception as e:
-    print(f"ERREUR : {e}")
-
-# ── Booking avis CSV ──────────────────────────────────────────────────────────
-print("\n" + "=" * 60)
-print("AVIS BOOKING (CSV brut)")
+print("AVIS BOOKING (CSV brut — source unique)")
 print("=" * 60)
 try:
     for enc in ["utf-8", "utf-8-sig", "latin-1", "cp1252"]:

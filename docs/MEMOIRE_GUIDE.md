@@ -2,7 +2,7 @@
 
 ## Structure Proposée pour le Mémoire de Master
 
-Ce document propose une structure pour votre mémoire de fin d'étude en Master Data Science.
+Ce document propose une structure pour votre mémoire de fin d'étude en DU SDA.
 
 ---
 

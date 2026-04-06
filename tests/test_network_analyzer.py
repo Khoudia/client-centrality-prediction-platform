@@ -18,6 +18,12 @@ class TestNetworkAnalyzer:
     """Tests pour la classe NetworkAnalyzer"""
 
     @pytest.fixture
+    def sample_clients(self):
+        """Fixture pour générer des profils clients d'exemple."""
+        loader = DataLoader()
+        return loader.generate_sample_data(n_clients=80)
+
+    @pytest.fixture
     def sample_interactions(self):
         """Fixture pour générer des interactions d'exemple"""
         loader = DataLoader()
@@ -26,9 +32,9 @@ class TestNetworkAnalyzer:
     def test_init(self):
         """Test l'initialisation de NetworkAnalyzer"""
         analyzer = NetworkAnalyzer()
-        assert analyzer.directed == False
-        assert analyzer.weighted == True
-        assert analyzer.graph is None
+        assert analyzer.directed is False
+        assert analyzer.weighted is True
+        assert isinstance(analyzer.graph, nx.Graph)
 
     def test_build_network(self, sample_interactions):
         """Test la construction du réseau"""
@@ -49,6 +55,15 @@ class TestNetworkAnalyzer:
         assert isinstance(centrality, dict)
         assert len(centrality) > 0
         assert all(0 <= v <= 1 for v in centrality.values())
+
+    def test_build_similarity_graph(self, sample_clients):
+        """Test la construction du graphe de similarité hôtelier."""
+        analyzer = NetworkAnalyzer()
+        graph = analyzer.build_similarity_graph(sample_clients, min_similarity=0.3, max_nodes=80)
+
+        assert isinstance(graph, nx.Graph)
+        assert graph.number_of_nodes() > 0
+        assert analyzer.graph.number_of_nodes() == graph.number_of_nodes()
 
     def test_calculate_all_centralities(self, sample_interactions):
         """Test le calcul de toutes les métriques"""

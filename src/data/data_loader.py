@@ -4,9 +4,11 @@ Hôtel Aurore Paris Gare de Lyon — Projet d'analyse réseau & satisfaction cli
 
 Sources de données :
   - availpro_export.xlsx          : réservations (AvailPro/Channel Manager)
-  - données avis traités.xlsx     : avis Booking.com nettoyés (Excel)
-  - données avis booking.csv      : avis Booking.com bruts (CSV malformaté)
+  - données avis booking.csv      : avis Booking.com bruts (CSV — source unique)
   - expediareviews_from_*.csv     : avis Expedia (tab-séparé + guillemets)
+
+Note : Le fichier 'données avis traités.xlsx' est identique au CSV brut.
+       Seul 'données avis booking.csv' est utilisé (source unique, traitement dans le code).
 
 Colonnes réelles observées (encodage CP1252/Latin-1, accents manquants) :
   AvailPro : 'Etat','Rfrence',"Date d'achat",'E-Mail',"Date d'arrive",
@@ -26,9 +28,7 @@ Colonnes réelles observées (encodage CP1252/Latin-1, accents manquants) :
              'review_title','review_text' (tab-séparé, guillemet résiduel)
 """
 
-import csv
 import hashlib
-import io
 import logging
 import re
 from pathlib import Path
@@ -236,24 +236,34 @@ def load_availpro_data(path: Optional[Path] = None) -> pd.DataFrame:
 
 def load_booking_reviews(path: Optional[Path] = None) -> pd.DataFrame:
     """
-    Charge les avis Booking.com depuis 'données avis traités.xlsx'
-    (préféré car déjà propre) ou depuis 'données avis booking.csv' en fallback.
+    Charge les avis Booking.com depuis 'données avis booking.csv' (source unique).
+
+    Le fichier CSV brut est le seul fichier d'avis Booking utilisé dans ce projet.
+    Le fichier 'données avis traités.xlsx' étant identique au CSV, il n'est pas utilisé
+    afin d'éviter les doublons et de garantir la traçabilité du traitement.
+
+    Format réel observé :
+      - Chaque ligne est une chaîne CSV entre guillemets doubles
+      - Colonnes : date, nom_client, numero_reservation, titre, commentaire_positif,
+                   commentaire_negatif, note_globale, note_personnel, note_proprete,
+                   note_situation, note_equipements, note_confort,
+                   note_rapport_qualite_prix, reponse_etablissement
+      - Séparateur de colonnes dans la chaîne : virgule
+      - Guillemets internes doublés
 
     Returns:
         DataFrame avec colonnes canoniques (voir _BOOKING_COL_MAP).
     """
-    # Préférer le fichier Excel traité
-    xlsx_path = path or (_RAW_DIR / "données avis traités.xlsx")
-    csv_path = _RAW_DIR / "données avis booking.csv"
+    csv_path = path or (_RAW_DIR / "données avis booking.csv")
 
-    if xlsx_path.exists():
-        logger.info(f"Chargement avis Booking (Excel traité) : {xlsx_path}")
-        df = _safe_read_excel(xlsx_path)
-    elif csv_path.exists():
-        logger.info(f"Chargement avis Booking (CSV brut) : {csv_path}")
-        df = _load_booking_csv_raw(csv_path)
-    else:
-        raise FileNotFoundError(f"Aucun fichier d'avis Booking trouvé dans {_RAW_DIR}")
+    if not csv_path.exists():
+        raise FileNotFoundError(
+            f"Fichier d'avis Booking introuvable : {csv_path}\n"
+            f"Attendu dans : {_RAW_DIR}"
+        )
+
+    logger.info(f"Chargement avis Booking (CSV brut) : {csv_path}")
+    df = _load_booking_csv_raw(csv_path)
 
     df = _rename_cols(df, _BOOKING_COL_MAP)
     logger.info(f"Avis Booking chargés : {df.shape[0]} lignes")
@@ -262,10 +272,27 @@ def load_booking_reviews(path: Optional[Path] = None) -> pd.DataFrame:
 
 def _load_booking_csv_raw(path: Path) -> pd.DataFrame:
     """
-    Charge le CSV Booking brut qui est séparé par des virgules
-    mais encapsulé dans un seul champ au premier niveau.
+    Charge le CSV Booking brut.
+
+    Format réel observé (analysé sur le vrai fichier) :
+      - Chaque ligne physique : '"DATE,""NOM"",""RESA"",...";;'
+      - Le contenu interne est un CSV avec guillemets doublés ("") et virgule séparateur
+      - Une entrée peut s'étendre sur plusieurs lignes physiques (ex : commentaire long)
+      - La ligne d'en-tête contient 'Date du commentaire'
+      - Chaque entrée se termine par ';;' (double point-virgule en fin de ligne)
+      - 1634 entrées au total (1634 dates distinctes trouvées dans le fichier)
+
+    Stratégie :
+      1. Lire le contenu brut entier
+      2. Reconstituer les entrées : une entrée = tout ce qui est entre deux dates
+         (regex sur les horodatages YYYY-MM-DD HH:MM:SS)
+      3. Pour chaque entrée, extraire le contenu CSV interne et le parser
+      4. Normaliser les colonnes
     """
-    rows = []
+    import csv as _csv
+    import io as _io
+    import re as _re
+
     expected_cols = [
         "date_commentaire", "nom_client", "numero_reservation",
         "titre_commentaire", "commentaire_positif", "commentaire_negatif",
@@ -273,18 +300,102 @@ def _load_booking_csv_raw(path: Path) -> pd.DataFrame:
         "note_situation", "note_equipements", "note_confort",
         "note_rapport_qualite_prix", "reponse_etablissement"
     ]
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            # Les lignes sont elles-mêmes en CSV entre guillemets
-            import csv, io
-            reader = csv.reader(io.StringIO(line))
+
+    # ── 1. Lire le fichier brut ──────────────────────────────────────────────
+    raw_content = None
+    for enc in ["utf-8", "utf-8-sig", "latin-1", "cp1252"]:
+        try:
+            with open(path, encoding=enc, errors="replace") as f:
+                raw_content = f.read()
+            break
+        except Exception:
+            continue
+
+    if not raw_content:
+        logger.error(f"Impossible de lire {path}")
+        return pd.DataFrame(columns=expected_cols)
+
+    raw_content = raw_content.replace("\r\n", "\n").replace("\r", "\n")
+
+    # ── 2. Reconstituer les entrées ──────────────────────────────────────────
+    # Chaque entrée commence par une ligne de la forme :
+    # "YYYY-MM-DD HH:MM:SS,...
+    # On identifie les positions des démarrages d'entrées par regex sur les dates
+    date_pattern = _re.compile(
+        r'"?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', _re.MULTILINE
+    )
+
+    # Trouver toutes les positions de dates dans le contenu
+    date_matches = list(date_pattern.finditer(raw_content))
+    logger.info(f"Dates détectées dans le CSV Booking : {len(date_matches)}")
+
+    rows = []
+
+    for i, match in enumerate(date_matches):
+        # Extraire le bloc de texte de cette entrée jusqu'à la prochaine date
+        start = match.start()
+        end = date_matches[i + 1].start() if i + 1 < len(date_matches) else len(raw_content)
+        block = raw_content[start:end]
+
+        # Nettoyer le bloc :
+        # - Enlever le guillemet ouvrant initial s'il est là
+        # - Enlever les ';;' de fin et sauts de ligne
+        block = block.strip().lstrip('"')
+        # Remplacer les fins de ligne dans le bloc (entrée multi-ligne) par espace
+        # mais conserver le bloc comme une seule chaîne CSV
+        block = block.replace("\n", " ").rstrip(";").rstrip()
+
+        # Le contenu est un CSV avec guillemets doublés ("")
+        # Parser avec csv.reader en mode guillemets doublés
+        try:
+            reader = _csv.reader(
+                _io.StringIO(block),
+                quotechar='"',
+                delimiter=',',
+                doublequote=True,
+            )
             for parts in reader:
-                if len(parts) >= 7:
+                if parts:
+                    # Nettoyer les espaces résiduels
+                    parts = [p.strip() for p in parts]
+                    # S'assurer qu'on a au moins 7 colonnes
+                    while len(parts) < 14:
+                        parts.append("")
                     rows.append(parts[:14])
-    df = pd.DataFrame(rows, columns=expected_cols[:min(14, len(rows[0]) if rows else 14)])
+                    break  # une seule ligne par entrée
+        except Exception as e:
+            # Fallback : split naïf sur virgule
+            parts = block.split(",")
+            parts = [p.strip().strip('"') for p in parts]
+            while len(parts) < 14:
+                parts.append("")
+            rows.append(parts[:14])
+
+    if not rows:
+        logger.warning(f"Aucune entrée Booking parsée depuis {path}")
+        return pd.DataFrame(columns=expected_cols)
+
+    df = pd.DataFrame(rows, columns=expected_cols)
+
+    # Nettoyer les guillemets résiduels ("" → vide, " → vide)
+    # Le format CSV avec guillemets doublés laisse parfois des "" en fin de champ
+    def _clean_field(x):
+        if not isinstance(x, str):
+            return x
+        # Supprimer les guillemets doublés résiduels
+        x = x.replace('""', '')
+        # Supprimer les guillemets simples en début/fin
+        x = x.strip('"').strip("'").strip()
+        return x if x else np.nan
+
+    for col in df.columns:
+        df[col] = df[col].apply(_clean_field)
+
+    # Remplacer les chaînes vides par NaN
+    df.replace("", np.nan, inplace=True)
+    df.replace({None: np.nan}, inplace=True)
+
+    logger.info(f"CSV Booking parsé : {len(df)} lignes, {len(df.columns)} colonnes")
     return df
 
 
@@ -309,50 +420,96 @@ def load_expedia_reviews(path: Optional[Path] = None) -> pd.DataFrame:
     rows = []
     cols = None
 
+    # Colonnes attendues dans le fichier Expedia
+    expedia_expected_cols = [
+        "review_date", "brand_type", "review_by", "review_rating",
+        "review_title", "review_text", "review_response_date",
+        "review_response_by", "review_response"
+    ]
+
+    raw_lines = None
     for enc in ["latin-1", "utf-8", "utf-8-sig", "cp1252"]:
         try:
             with open(path, encoding=enc, errors="replace") as f:
-                for i, line in enumerate(f):
-                    line = line.rstrip("\n").rstrip("\r")
-                    if not line.strip():
-                        continue
-                    # Chaque ligne peut être une seule cellule contenant des \t
-                    # ou plusieurs cellules séparées par des \t
-                    parts = line.split("\t")
-                    if i == 0:
-                        # Nettoyer le guillemet résiduel en tête et fin
-                        cols = [
-                            p.strip().strip('"').strip("'").strip(";")
-                            for p in parts
-                        ]
-                    else:
-                        cleaned = [
-                            p.strip().strip('"').strip(";")
-                            for p in parts
-                        ]
-                        if any(c.strip() for c in cleaned):
-                            rows.append(cleaned)
+                raw_lines = f.readlines()
             break
         except Exception:
             continue
 
-    if not cols:
+    if not raw_lines:
         logger.warning("Impossible de lire le fichier Expedia — retour DataFrame vide")
         return pd.DataFrame()
 
-    # Harmoniser les longueurs
-    n = len(cols)
-    rows_clean = []
-    for r in rows:
-        if len(r) < n:
-            r = r + [""] * (n - len(r))
-        rows_clean.append(r[:n])
+    # Cas 1 : le fichier a une vraie ligne d'en-tête tab-séparée
+    # Cas 2 : chaque ligne est une cellule unique contenant des \t internes
+    #         (le fichier semble parsé comme une seule colonne par read_csv)
 
-    df = pd.DataFrame(rows_clean, columns=cols)
+    # Déterminer la structure : si la ligne 0 contient des \t, c'est tab-séparé normal
+    first_non_empty = next((l.rstrip("\n\r") for l in raw_lines if l.strip()), "")
+
+    # Tester si la ligne contient déjà des tabulations (vraies colonnes)
+    if first_non_empty.count("\t") >= 3:
+        # Format tab-séparé standard
+        cols = None
+        rows = []
+        for i, line in enumerate(raw_lines):
+            line = line.rstrip("\n\r")
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            # Nettoyer guillemets résiduels
+            parts = [p.strip().strip('"').strip("'").strip(";") for p in parts]
+            if i == 0:
+                # En-tête
+                cols = parts
+            else:
+                if any(p.strip() for p in parts):
+                    rows.append(parts)
+
+        if cols and rows:
+            n = len(cols)
+            rows_norm = [
+                (r + [""] * n)[:n] for r in rows
+            ]
+            df = pd.DataFrame(rows_norm, columns=cols)
+        else:
+            df = pd.DataFrame(columns=expedia_expected_cols)
+
+    else:
+        # Format "ligne = cellule avec \t internes" (Expedia export encapsulé)
+        # La première ligne non-vide contient l'en-tête encapsulé
+        rows = []
+        header_found = False
+        cols = expedia_expected_cols  # colonnes par défaut
+
+        for line in raw_lines:
+            line = line.rstrip("\n\r").strip().strip('"').strip("'")
+            if not line:
+                continue
+            # Split sur \t interne
+            parts = [p.strip().strip('"').strip("'").strip(";") for p in line.split("\t")]
+            # Ignorer la ligne d'en-tête si elle contient "review_date"
+            if not header_found and any("review_date" in p.lower() for p in parts):
+                header_found = True
+                # Extraire les vraies colonnes
+                cols = [p for p in parts if p.strip()]
+                if not cols:
+                    cols = expedia_expected_cols
+                continue
+            if len(parts) >= 4 and any(p.strip() for p in parts):
+                rows.append(parts)
+
+        if rows:
+            n = len(cols)
+            rows_norm = [(r + [""] * n)[:n] for r in rows]
+            df = pd.DataFrame(rows_norm, columns=cols)
+        else:
+            df = pd.DataFrame(columns=expedia_expected_cols)
 
     # Supprimer colonnes vides ou 'Unnamed'
-    df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
+    df.columns = pd.Index(df.columns)  # garantit pd.Index pour .str
     df = df.loc[:, df.columns.str.strip() != ""]
+    df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
 
     # Nettoyer les noms de colonnes résiduels
     df.columns = [c.strip().strip('"').strip("'").strip(";") for c in df.columns]
@@ -596,11 +753,28 @@ def clean_booking_reviews(df: pd.DataFrame) -> pd.DataFrame:
         df["note_composite"] = df[sub_cols].mean(axis=1)
 
     # Normaliser le numéro de réservation pour la jointure
+    # Les numéros sont déjà des entiers dans le CSV Booking (ex: 3044529099)
+    # On les normalise en string pour la jointure
     if "numero_reservation" in df.columns:
-        df["numero_reservation"] = (
-            pd.to_numeric(df["numero_reservation"], errors="coerce")
-            .apply(lambda x: str(int(x)) if pd.notna(x) else np.nan)
-        )
+        def _norm_num_resa(x):
+            if pd.isna(x) or str(x).strip() in ("", "nan"):
+                return np.nan
+            s = str(x).strip().strip('"').strip("'")
+            # Notation scientifique
+            if "e" in s.lower():
+                try:
+                    return str(int(float(s)))
+                except (ValueError, OverflowError):
+                    return s
+            # Float avec .0
+            try:
+                f = float(s)
+                if f == int(f):
+                    return str(int(f))
+            except (ValueError, OverflowError):
+                pass
+            return re.sub(r"[^\d]", "", s) or np.nan
+        df["numero_reservation"] = df["numero_reservation"].apply(_norm_num_resa)
 
     df["source"] = "booking"
     logger.info(f"Avis Booking nettoyés : {df.shape[0]} lignes")
@@ -679,24 +853,55 @@ def merge_reviews_with_reservations(
         "source",
     ]
 
-    def _try_merge(left_col: str, right_col: str) -> Optional[pd.DataFrame]:
+    def _normalize_booking_ref(series: pd.Series) -> pd.Series:
+        """
+        Normalise un numéro de réservation en entier string.
+        Gère : notation scientifique (6.497953e+09 → '6497953XXX'),
+        float avec .0, string, NaN.
+        """
+        def _norm(x):
+            if pd.isna(x) or str(x).strip() in ("", "nan", "none", "NaN"):
+                return ""
+            s = str(x).strip().strip('"').strip("'")
+            # Notation scientifique
+            if "e" in s.lower() or "E" in s:
+                try:
+                    return str(int(float(s)))
+                except (ValueError, OverflowError):
+                    return s
+            # Float avec .0
+            try:
+                f = float(s)
+                if f == int(f):
+                    return str(int(f))
+            except (ValueError, OverflowError):
+                pass
+            # Garder uniquement les chiffres
+            digits = re.sub(r"[^\d]", "", s)
+            return digits if digits else ""
+        return series.apply(_norm)
+
+    def _try_merge(left_col: str, right_col: str) -> Optional[Tuple]:
         """Tente une jointure entre df_res[left_col] et df_rev[right_col]."""
         if left_col not in df_res.columns or right_col not in df_rev.columns:
             return None
-        # Normaliser : extraire les chiffres entiers pour la comparaison
-        l_key = (
-            pd.to_numeric(df_res[left_col], errors="coerce")
-            .apply(lambda x: str(int(x)) if pd.notna(x) else "")
-        )
-        r_key = (
-            pd.to_numeric(df_rev[right_col], errors="coerce")
-            .apply(lambda x: str(int(x)) if pd.notna(x) else "")
-        )
+        # Normaliser les deux clés
+        l_key = _normalize_booking_ref(df_res[left_col])
+        r_key = _normalize_booking_ref(df_rev[right_col])
+
+        # Log des clés pour diagnostic
+        l_sample = l_key[l_key != ""].head(3).tolist()
+        r_sample = r_key[r_key != ""].head(3).tolist()
+        logger.debug(f"  Clés gauche ({left_col}): {l_sample}")
+        logger.debug(f"  Clés droite ({right_col}): {r_sample}")
+
         # Construire le sous-DataFrame d'avis avec clé + colonnes voulues
         avail_cols = [right_col] + [c for c in review_cols_wanted if c in df_rev.columns]
         df_rev_sub = df_rev[avail_cols].copy()
         df_rev_sub["_join_key"] = r_key
         df_rev_sub = df_rev_sub.drop(columns=[right_col]).drop_duplicates("_join_key")
+        # Supprimer les lignes avec clé vide
+        df_rev_sub = df_rev_sub[df_rev_sub["_join_key"] != ""]
 
         df_res_tmp = df_res.copy()
         df_res_tmp["_join_key"] = l_key
@@ -707,26 +912,34 @@ def merge_reviews_with_reservations(
         return merged, n
 
     # Tentative 1 : reference_partenaire ↔ numero_reservation
+    merged = df_res.copy()
+    n_matched = 0
+
     result = _try_merge("reference_partenaire", "numero_reservation")
     if result is not None:
-        merged, n_matched = result
-        logger.info(f"Jointure via reference_partenaire : {n_matched} réservations matchées")
-        if n_matched == 0:
-            # Tentative 2 : reference ↔ numero_reservation
-            result2 = _try_merge("reference", "numero_reservation")
-            if result2 is not None:
-                merged2, n2 = result2
-                if n2 > n_matched:
-                    merged, n_matched = merged2, n2
-                    logger.info(f"Jointure via reference : {n_matched} réservations matchées")
-    else:
+        merged_try, n_try = result
+        logger.info(f"Jointure via reference_partenaire : {n_try} avis matchés")
+        if n_try > n_matched:
+            merged, n_matched = merged_try, n_try
+
+    # Tentative 2 : reference ↔ numero_reservation (si premier essai insuffisant)
+    if n_matched == 0:
         result2 = _try_merge("reference", "numero_reservation")
         if result2 is not None:
-            merged, n_matched = result2
-            logger.info(f"Jointure via reference : {n_matched} réservations matchées")
-        else:
-            merged = df_res.copy()
-            logger.warning("Jointure sur numéro de réservation impossible — colonnes absentes")
+            merged_try2, n_try2 = result2
+            logger.info(f"Jointure via reference : {n_try2} avis matchés")
+            if n_try2 > n_matched:
+                merged, n_matched = merged_try2, n_try2
+
+    if n_matched == 0:
+        logger.warning(
+            "Aucun avis Booking n'a pu être jointurer avec les réservations. "
+            "Vérifiez que 'Rfrence partenaire' dans AvailPro correspond bien "
+            "au 'Numro de rservation' dans le CSV Booking. "
+            "Les notes seront affectées par source comme avis indépendants."
+        )
+        # Fallback : enrichir le dataset avec les notes moyennes par source si disponible
+        # Les avis restent dans df_final.attrs["booking_reviews"] pour usage séparé
 
     # Flags satisfaction
     if "note_globale" in merged.columns:
@@ -948,7 +1161,7 @@ class DataLoader:
         df = df.copy()
         if "client_id" in df.columns:
             df = df.dropna(subset=["client_id"])
-        for col in df.select_dtypes(include=[object]).columns:
+        for col in df.select_dtypes(include=["object", "string"]).columns:
             df[col] = df[col].str.strip() if hasattr(df[col], "str") else df[col]
         return df
 

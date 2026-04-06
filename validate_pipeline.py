@@ -15,6 +15,8 @@ import sys
 import logging
 from pathlib import Path
 
+import networkx as nx
+
 # ── Setup ─────────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -83,7 +85,7 @@ logger.info("ÉTAPE 2 : Construction du graphe de similarité")
 logger.info("="*70)
 
 try:
-    G, profile_df = build_similarity_graph(df, min_similarity=0.3)
+    G, profile_df = build_similarity_graph(df, min_similarity=0.3, max_nodes=500)
     logger.info(f"✓ Graphe construit : {G.number_of_nodes()} nœuds, {G.number_of_edges()} arêtes")
     n_components = len(list(nx.connected_components(G)))
     logger.info(f"  Composantes connexes : {n_components}")
@@ -171,8 +173,14 @@ try:
 
             results = predictor.train(X, y)
             logger.info(f"  ✓ Modèle entraîné")
-            logger.info(f"    Métrique de validation (CV) : {results.get('cv_score', 'N/A'):.3f}")
-            logger.info(f"    F1-score : {results.get('f1_score', 'N/A'):.3f}")
+            if "cv_mean" in results:
+                logger.info(f"    Validation croisée (CV) : {results['cv_mean']:.3f} ± {results.get('cv_std', 0):.3f}")
+            if "accuracy" in results:
+                logger.info(f"    Accuracy : {results['accuracy']:.3f}")
+            if "f1_weighted" in results:
+                logger.info(f"    F1-weighted : {results['f1_weighted']:.3f}")
+            if "roc_auc" in results and results["roc_auc"] is not None:
+                logger.info(f"    ROC-AUC : {results['roc_auc']:.3f}")
 
         except Exception as e:
             logger.warning(f"  ⚠ Entraînement du modèle : {e}")
@@ -213,9 +221,7 @@ try:
     logger.info("  ✓ Satisfaction par communauté générée")
 
     logger.info(f"  Satisfaction par canal…")
-    viz.plot_satisfaction_by_attribute(
-        df_enriched, attr="channel_group", title="Satisfaction par canal"
-    )
+    viz.plot_satisfaction_by_channel(df_enriched)
     logger.info("  ✓ Satisfaction par canal générée")
 
 except Exception as e:
