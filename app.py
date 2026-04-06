@@ -59,6 +59,21 @@ st.markdown("""
 .main-header { font-size:2.2rem; color:#1f3c88; font-weight:700; text-align:center; margin-bottom:1rem; }
 .kpi-box { background:#f4f6fb; padding:0.8rem 1.2rem; border-radius:8px; border-left:4px solid #1f3c88; }
 .section-title { color:#1f3c88; font-size:1.3rem; font-weight:600; margin-top:1rem; }
+/* Scoring panel styles */
+.score-panel { background:linear-gradient(135deg,#1f3c88 0%,#2d5be3 100%);
+    color:white; padding:1.5rem; border-radius:12px; text-align:center; margin-bottom:1rem; }
+.score-value { font-size:3.5rem; font-weight:800; }
+.score-label { font-size:1.1rem; opacity:0.9; margin-top:0.3rem; }
+.level-badge-green  { background:#27ae60; color:white; padding:0.4rem 1rem; border-radius:20px; font-weight:600; }
+.level-badge-yellow { background:#f39c12; color:white; padding:0.4rem 1rem; border-radius:20px; font-weight:600; }
+.level-badge-orange { background:#e67e22; color:white; padding:0.4rem 1rem; border-radius:20px; font-weight:600; }
+.level-badge-red    { background:#e74c3c; color:white; padding:0.4rem 1rem; border-radius:20px; font-weight:600; }
+.recep-msg { background:#eaf4fb; border-left:4px solid #2980b9;
+    padding:1rem 1.2rem; border-radius:8px; font-size:0.95rem; line-height:1.6; }
+.review-phrase { background:#f8f9fa; border-radius:6px; padding:0.6rem 1rem;
+    margin:0.3rem 0; font-style:italic; color:#444; }
+.factor-good { color:#27ae60; font-weight:600; }
+.factor-warn { color:#e67e22; font-weight:600; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -129,6 +144,9 @@ for key, default in [
     ("multi_results",     None),
     ("predictor_obj",     None),
     ("current_task_type", "classification"),
+    # Onglet Scoring Nouveau Client
+    ("scoring_result",    None),
+    ("scoring_dict",      None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -152,6 +170,7 @@ PAGES = [
     "🧹 Préparation & Nettoyage",
     "🕸️ Analyse Réseau",
     "🤖 Satisfaction & Modélisation",
+    "🎯 Scoring Nouveau Client",
     "📊 Visualisations",
     "💾 Export",
 ]
@@ -816,7 +835,419 @@ elif page == "🤖 Satisfaction & Modélisation":
             st.pyplot(fig)
 
 # =============================================================================
-# PAGE 6 — VISUALISATIONS
+# PAGE 6 — SCORING NOUVEAU CLIENT  (onglet premium)
+# =============================================================================
+elif page == "🎯 Scoring Nouveau Client":
+    st.markdown(
+        '<h1 class="main-header">🎯 Satisfaction & Scoring Nouveau Client</h1>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "**Outil premium réception** — Renseignez les caractéristiques d'un séjour "
+        "et obtenez une estimation de la satisfaction probable ainsi qu'un message "
+        "d'accueil personnalisé."
+    )
+    st.markdown("---")
+
+    # ── Vérification modèle ──────────────────────────────────────────────────
+    pred_obj = _ss("predictor_obj")
+    df_ref   = _first_available_df("df_enriched", "df_final")
+
+    if pred_obj is None or pred_obj.model is None:
+        st.warning(
+            "⚠️ Aucun modèle disponible. Veuillez d'abord entraîner un modèle "
+            "dans la page **🤖 Satisfaction & Modélisation** "
+            "(ou utilisez le **Pipeline automatique** dans la barre latérale)."
+        )
+        st.info(
+            "💡 **Conseil rapide** : cliquez sur **Tout exécuter (pipeline)** "
+            "dans la barre latérale pour initialiser toute la chaîne en une seule action."
+        )
+        st.stop()
+
+    st.success(
+        f"✅ Modèle chargé : **{pred_obj.model_type}** — tâche : **{pred_obj.task}** "
+        f"— {len(pred_obj.feature_names)} features"
+    )
+
+    # ── Collecte des options depuis les données réelles ───────────────────────
+    def _get_options(col: str, defaults: list) -> list:
+        if df_ref is not None and col in df_ref.columns:
+            opts = [str(v) for v in df_ref[col].dropna().unique() if str(v).strip()]
+            opts = sorted(set(opts))
+            return opts if opts else defaults
+        return defaults
+
+    channels     = _get_options("channel_group", ["Direct", "Booking.com", "Expedia", "Agence", "Téléphone", "Autre"])
+    room_segs    = _get_options("room_segment",  ["Standard", "Supérieure", "Deluxe", "Suite", "Autre"])
+    amt_buckets  = _get_options("amount_bucket", ["< 100€", "100-200€", "200-400€", "400-800€", "> 800€"])
+    pays_opts    = _get_options("pays",          ["France", "Royaume-Uni", "Allemagne", "Italie", "Espagne", "USA", "Belgique", "Autre"])
+    langue_opts  = _get_options("langue",        ["fr", "en", "de", "it", "es", "nl", "Autre"])
+
+    MOIS_LABELS = {
+        1: "Janvier", 2: "Février", 3: "Mars", 4: "Avril",
+        5: "Mai", 6: "Juin", 7: "Juillet", 8: "Août",
+        9: "Septembre", 10: "Octobre", 11: "Novembre", 12: "Décembre",
+    }
+    NO_VALUE = "(non renseigné)"
+
+    # ── Formulaire ───────────────────────────────────────────────────────────
+    with st.form("form_scoring_client"):
+        st.markdown("### 📋 Caractéristiques du nouveau séjour")
+        st.caption("Les champs non renseignés n'empêchent pas la prédiction.")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.markdown("**Profil & canal**")
+            channel = st.selectbox(
+                "Canal de réservation",
+                [NO_VALUE] + channels,
+                key="sc_channel",
+            )
+            partenaire = st.text_input(
+                "Partenaire / Source (optionnel)",
+                key="sc_partner",
+                placeholder="ex : Booking.com, Direct site…",
+            )
+            pays = st.selectbox("Nationalité / Pays", [NO_VALUE] + pays_opts, key="sc_pays")
+            langue = st.selectbox("Langue", [NO_VALUE] + langue_opts, key="sc_langue")
+
+        with col2:
+            st.markdown("**Séjour**")
+            room_seg = st.selectbox("Type de chambre", [NO_VALUE] + room_segs, key="sc_room")
+            arrival_month = st.selectbox(
+                "Mois d'arrivée",
+                [NO_VALUE] + [f"{k} — {v}" for k, v in MOIS_LABELS.items()],
+                key="sc_month",
+            )
+            stay_length = st.number_input(
+                "Durée du séjour (nuits)",
+                min_value=0, max_value=60, value=0, step=1,
+                key="sc_stay",
+                help="Laissez 0 si inconnu",
+            )
+            lead_time = st.number_input(
+                "Délai de réservation (jours avant arrivée)",
+                min_value=0, max_value=730, value=0, step=1,
+                key="sc_lead",
+                help="Laissez 0 si réservé aujourd'hui ou inconnu",
+            )
+
+        with col3:
+            st.markdown("**Composition & tarif**")
+            amount_bucket = st.selectbox(
+                "Tranche de montant", [NO_VALUE] + amt_buckets, key="sc_amount"
+            )
+            adultes = st.number_input(
+                "Nombre d'adultes", min_value=0, max_value=10, value=1, step=1,
+                key="sc_adults",
+            )
+            enfants = st.number_input(
+                "Nombre d'enfants", min_value=0, max_value=10, value=0, step=1,
+                key="sc_children",
+            )
+            st.markdown("&nbsp;")
+            st.markdown("&nbsp;")
+
+        submitted = st.form_submit_button(
+            "🔮 Prédire la satisfaction", type="primary", use_container_width=True
+        )
+
+    # ── Traitement à la soumission ────────────────────────────────────────────
+    if submitted:
+        client_dict: dict = {}
+
+        if channel != NO_VALUE:
+            client_dict["channel_group"] = channel
+        if pays != NO_VALUE:
+            client_dict["pays"] = pays
+        if langue != NO_VALUE:
+            client_dict["langue"] = langue
+        if room_seg != NO_VALUE:
+            client_dict["room_segment"] = room_seg
+        if amount_bucket != NO_VALUE:
+            client_dict["amount_bucket"] = amount_bucket
+        if arrival_month != NO_VALUE:
+            try:
+                client_dict["arrival_month"] = int(arrival_month.split(" — ")[0])
+            except Exception:
+                pass
+        if stay_length > 0:
+            client_dict["stay_length"] = int(stay_length)
+        if lead_time > 0:
+            client_dict["lead_time_days"] = int(lead_time)
+        if adultes > 0:
+            client_dict["adultes"] = int(adultes)
+        if enfants > 0:
+            client_dict["enfants"] = int(enfants)
+
+        try:
+            with st.spinner("Calcul du score de satisfaction…"):
+                result = pred_obj.predict_single(client_dict)
+            _set("scoring_result", result)
+            _set("scoring_dict", client_dict)
+        except Exception as exc:
+            st.error(f"❌ Erreur lors de la prédiction : {exc}")
+            logger.exception(exc)
+
+    # ── Affichage des résultats ───────────────────────────────────────────────
+    result = _ss("scoring_result")
+
+    if result is not None:
+        score       = result["score"]
+        level_num   = result["level_num"]
+        level_icon  = result["level_icon"]
+        level_lbl   = result["satisfaction_level"]
+        vigilance   = result["vigilance"]
+        attention   = result["attention"]
+        conseil     = result["conseil"]
+        rec_msg     = result["receptionist_msg"]
+        prob_reviews= result["probable_reviews"]
+        f_factors   = result["feature_factors"]
+        probability = result.get("probability")
+        n_prov      = result["n_features_provided"]
+        n_tot       = result["n_features_total"]
+
+        st.markdown("---")
+        st.markdown("## 📊 Résultats de l'analyse")
+
+        # ── BLOC 1 : Score de satisfaction ────────────────────────────────────
+        st.markdown("### 1️⃣ Score de satisfaction prédit")
+
+        # Palette de couleur
+        gauge_color = {"green": "#27ae60", "#2ecc71": "#2ecc71", "orange": "#e67e22",
+                       "red": "#e74c3c"}.get(result["level_color"], "#2980b9")
+
+        col_score, col_jauge, col_meta = st.columns([1, 2, 1])
+
+        with col_score:
+            st.markdown(
+                f"<div class='score-panel' style='background:linear-gradient(135deg,{gauge_color} 0%,{gauge_color}aa 100%);'>"
+                f"<div class='score-value'>{score:.1f}<span style='font-size:1.5rem'>/10</span></div>"
+                f"<div class='score-label'>{level_icon} {level_lbl}</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+        with col_jauge:
+            st.markdown("**Jauge de satisfaction**")
+            st.progress(min(score / 10.0, 1.0))
+            if probability is not None:
+                st.caption(f"Probabilité de haute satisfaction : **{probability:.1%}**")
+            levels = ["🔴 Fragile", "🟠 Moyenne", "🟡 Élevée", "🟢 Très probable"]
+            for i, lbl in enumerate(levels, 1):
+                marker = " ◀ **ce client**" if i == level_num else ""
+                st.markdown(f"{'&nbsp;' * (i * 4)}{lbl}{marker}", unsafe_allow_html=True)
+
+        with col_meta:
+            st.metric("Vigilance", vigilance)
+            st.metric("Couverture features", f"{n_prov}/{n_tot}")
+            badge_class = {4: "green", 3: "yellow", 2: "orange", 1: "red"}.get(level_num, "green")
+            st.markdown(
+                f"<br><span class='level-badge-{badge_class}'>{level_icon} {level_lbl}</span>",
+                unsafe_allow_html=True,
+            )
+
+        # ── BLOC 2 : Interprétation métier ────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### 2️⃣ Interprétation métier")
+
+        i1, i2, i3 = st.columns(3)
+        with i1:
+            st.markdown("**Niveau d'attention recommandé**")
+            st.info(f"🎯 {attention}")
+        with i2:
+            st.markdown("**Niveau de vigilance**")
+            st.info(f"⚠️ {vigilance}")
+        with i3:
+            st.markdown("**Potentiel d'expérience positive**")
+            potential = {4: "Très élevé ✨", 3: "Élevé 👍", 2: "Modéré 🔄", 1: "À construire 🛠️"}
+            st.info(potential.get(level_num, "—"))
+
+        st.markdown("**Conseils de personnalisation de l'accueil**")
+        st.markdown(
+            f"<div class='recep-msg' style='border-color:{gauge_color};'>💡 {conseil}</div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── BLOC 3 : Message au réceptionniste ────────────────────────────────
+        st.markdown("---")
+        st.markdown("### 3️⃣ Message au réceptionniste")
+        st.caption("Message professionnel, bienveillant et directement exploitable par la réception.")
+
+        # Formater les sauts de ligne
+        msg_lines = rec_msg.replace("\n\n", "\n").split("\n")
+        formatted_msg = "<br>".join(msg_lines)
+
+        st.markdown(
+            f"<div class='recep-msg'>"
+            f"<strong>📋 Consigne d'accueil</strong><br><br>"
+            f"{formatted_msg}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        # Bouton de copie (via text_area copiable)
+        with st.expander("📋 Copier ce message"):
+            st.text_area(
+                "Message prêt à copier :",
+                value=rec_msg,
+                height=150,
+                key="ta_recep_msg",
+                label_visibility="collapsed",
+            )
+
+        # ── BLOC 4 : Avis probable ────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### 4️⃣ Avis probable / Phrases probables")
+        st.caption(
+            "Basé sur le profil et le score prédit — indicatif, non garanti."
+        )
+
+        if prob_reviews:
+            for phrase in prob_reviews:
+                st.markdown(
+                    f"<div class='review-phrase'>💬 {phrase}</div>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.info("Aucune phrase générée pour ce profil.")
+
+        themes_col1, themes_col2 = st.columns(2)
+        with themes_col1:
+            st.markdown("**Thèmes probables de satisfaction**")
+            if level_num >= 3:
+                st.markdown("- ✅ Accueil et personnel\n- ✅ Localisation\n- ✅ Confort")
+            elif level_num == 2:
+                st.markdown("- ✅ Localisation\n- 🔄 Accueil standard\n- 🔄 Rapport qualité/prix")
+            else:
+                st.markdown("- 🔄 Localisation\n- ⚠️ Attentes à confirmer")
+        with themes_col2:
+            st.markdown("**Points de vigilance possibles**")
+            if level_num >= 3:
+                st.markdown("- ℹ️ Peu de points critiques attendus")
+            else:
+                st.markdown("- ⚠️ Clarté des informations à l'arrivée\n- ⚠️ Confort perçu\n- ⚠️ Fluidité du check-in")
+
+        # ── BLOC 5 : Comparaison ──────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### 5️⃣ Comparaison avec les données historiques")
+
+        if df_ref is not None and "review_score" in df_ref.columns:
+            avg_global = df_ref["review_score"].mean()
+            avg_global_norm = avg_global  # déjà en /10
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Score prédit (ce client)", f"{score:.1f}/10")
+            c2.metric("Moyenne globale hôtel", f"{avg_global_norm:.2f}/10")
+            delta_val = score - avg_global_norm
+            c3.metric(
+                "Écart à la moyenne",
+                f"{delta_val:+.2f}",
+                delta=f"{delta_val:+.2f}",
+                delta_color="normal",
+            )
+
+            # Comparaison par canal
+            client_dict_ss = _ss("scoring_dict") or {}
+            ch_val = client_dict_ss.get("channel_group")
+            if ch_val and "channel_group" in df_ref.columns:
+                df_ch = df_ref[df_ref["channel_group"] == ch_val]
+                if len(df_ch) >= 5:
+                    avg_ch = df_ch["review_score"].mean()
+                    st.markdown(
+                        f"**Canal `{ch_val}`** — Moyenne historique : **{avg_ch:.2f}/10** "
+                        f"({len(df_ch):,} réservations) — Écart : **{score - avg_ch:+.2f}**"
+                    )
+
+            # Comparaison par communauté si disponible
+            comms_dict = _ss("communities")
+            if comms_dict and "community_id" in df_ref.columns:
+                st.info(
+                    "ℹ️ La comparaison par communauté nécessite que le nouveau client "
+                    "soit assigné à une communauté (disponible après analyse réseau)."
+                )
+
+            # Mini-tableau positionnement
+            st.markdown("**Positionnement global**")
+            pct_below = (df_ref["review_score"] < score).mean() * 100
+            st.progress(min(pct_below / 100, 1.0))
+            st.caption(
+                f"Ce score est supérieur à **{pct_below:.0f}%** des réservations historiques."
+            )
+        else:
+            st.info(
+                "⏳ Les données historiques ne sont pas disponibles. "
+                "Chargez et préparez les données pour afficher cette comparaison."
+            )
+
+        # ── BLOC 6 : Explication ──────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### 6️⃣ Explication de la prédiction")
+
+        tab_factors, tab_importance = st.tabs(
+            ["🔍 Facteurs identifiés", "📊 Importance des variables"]
+        )
+
+        with tab_factors:
+            fav  = f_factors.get("favorable", [])
+            vig  = f_factors.get("vigilance", [])
+
+            col_f, col_v = st.columns(2)
+            with col_f:
+                st.markdown("**✅ Facteurs favorables**")
+                if fav:
+                    for item in fav:
+                        st.markdown(
+                            f"<span class='factor-good'>✅ {item}</span>",
+                            unsafe_allow_html=True,
+                        )
+                else:
+                    st.markdown("_Aucun facteur particulier identifié_")
+
+            with col_v:
+                st.markdown("**⚠️ Points de vigilance**")
+                if vig:
+                    for item in vig:
+                        st.markdown(
+                            f"<span class='factor-warn'>⚠️ {item}</span>",
+                            unsafe_allow_html=True,
+                        )
+                else:
+                    st.markdown("_Aucun point de vigilance particulier_")
+
+        with tab_importance:
+            imp_df = pred_obj.get_feature_importance(top_n=10)
+            if not imp_df.empty:
+                st.markdown("**Top 10 variables les plus influentes dans le modèle**")
+                st.bar_chart(imp_df.set_index("feature")["importance"])
+                with st.expander("Tableau détaillé"):
+                    st.dataframe(imp_df, use_container_width=True)
+            else:
+                st.info("Importance des variables non disponible pour ce modèle.")
+
+        # ── Récapitulatif des paramètres saisis ───────────────────────────────
+        with st.expander("🗂️ Récapitulatif des paramètres saisis"):
+            client_dict_ss = _ss("scoring_dict") or {}
+            if client_dict_ss:
+                recap_data = [
+                    {"Paramètre": k, "Valeur": str(v)}
+                    for k, v in client_dict_ss.items()
+                ]
+                st.dataframe(pd.DataFrame(recap_data), use_container_width=True)
+            else:
+                st.write("Aucun paramètre enregistré.")
+
+        st.markdown("---")
+        st.caption(
+            "⚠️ Ce score est une estimation probabiliste basée sur les données historiques. "
+            "Il ne constitue pas un jugement sur la qualité du client et doit être utilisé "
+            "uniquement pour optimiser la qualité de l'accueil."
+        )
+
+# =============================================================================
+# PAGE 7 — VISUALISATIONS
 # =============================================================================
 elif page == "📊 Visualisations":
     st.header("📊 Visualisations")
@@ -909,7 +1340,7 @@ elif page == "📊 Visualisations":
         st.pyplot(fig)
 
 # =============================================================================
-# PAGE 7 — EXPORT
+# PAGE 8 — EXPORT
 # =============================================================================
 elif page == "💾 Export":
     st.header("💾 Export des résultats")

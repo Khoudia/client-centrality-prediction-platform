@@ -206,6 +206,8 @@ class SatisfactionPredictor:
         self.feature_importances: Optional[pd.DataFrame] = None
         self.evaluation_results: Dict = {}
         self.models: Dict[str, Any] = {}  # Résultats multi-modèles
+        # Stockage des encodeurs catégoriels pour l'inférence sur nouvelle observation
+        self._label_encoders: Dict[str, LabelEncoder] = {}
 
         self._target_col = (
             "high_satisfaction" if task == "classification" else "review_score"
@@ -215,6 +217,23 @@ class SatisfactionPredictor:
     # ------------------------------------------------------------------
     # Initialisation du modèle
     # ------------------------------------------------------------------
+
+    def _fit_and_encode(self, df: pd.DataFrame, cat_cols: List[str]) -> pd.DataFrame:
+        """
+        Encode les colonnes catégorielles et stocke les LabelEncoders
+        pour permettre l'inférence sur une seule observation ultérieure.
+        Robuste : ignore les colonnes absentes, gère les NaN.
+        """
+        df = df.copy()
+        for col in cat_cols:
+            if col not in df.columns:
+                continue
+            df[col] = df[col].fillna("unknown").astype(str)
+            le = LabelEncoder()
+            le.fit(df[col])
+            self._label_encoders[col] = le
+            df[col] = le.transform(df[col])
+        return df
 
     def _initialize_model(self):
         """Instancie le modèle selon task et model_type."""
@@ -319,8 +338,8 @@ class SatisfactionPredictor:
         num_feats, cat_feats = _select_features(df_valid, target, extra_exclude)
         self.cat_features = cat_feats
 
-        # Encoder les catégorielles
-        df_encoded = _encode_categoricals(df_valid, cat_feats)
+        # Encoder les catégorielles et stocker les encodeurs pour l'inférence
+        df_encoded = self._fit_and_encode(df_valid, cat_feats)
 
         all_feats = num_feats + cat_feats
         # Garder uniquement les features présentes
@@ -534,6 +553,372 @@ class SatisfactionPredictor:
             return None
         X_s = self.scaler.transform(X.fillna(0))
         return self.model.predict_proba(X_s)
+
+    # ------------------------------------------------------------------
+    # Prédiction sur une seule observation (nouvel onglet Scoring)
+    # ------------------------------------------------------------------
+
+    def _encode_single_categoricals(self, row: dict) -> dict:
+        """
+        Encode les variables catégorielles d'une observation unique
+        en utilisant les LabelEncoders stockés lors de l'entraînement.
+        Les catégories inconnues sont ramenées à "unknown" (ou 0 par défaut).
+        """
+        row = row.copy()
+        for col in self.cat_features:
+            if col not in row:
+                row[col] = 0
+                continue
+            val = row[col]
+            if val is None or (isinstance(val, float) and np.isnan(val)):
+                row[col] = 0
+                continue
+            val_str = str(val)
+            if col in self._label_encoders:
+                le = self._label_encoders[col]
+                known = set(le.classes_)
+                if val_str not in known:
+                    val_str = "unknown" if "unknown" in known else None
+                if val_str is not None:
+                    row[col] = int(le.transform([val_str])[0])
+                else:
+                    row[col] = 0
+            else:
+                row[col] = 0
+        return row
+
+    @staticmethod
+    def _get_satisfaction_level(score: float) -> dict:
+        """Retourne les informations de niveau de satisfaction selon le score."""
+        if score >= 9.0:
+            return {
+                "satisfaction_level": "Satisfaction très probable",
+                "level_color": "green",
+                "level_icon": "🟢",
+                "level_num": 4,
+                "vigilance": "Faible",
+                "attention": "Standard",
+                "conseil": (
+                    "Maintenir l'excellence du service. Ce profil est à fort potentiel "
+                    "de fidélisation. Valoriser la qualité de l'expérience dès le check-in."
+                ),
+            }
+        elif score >= 7.5:
+            return {
+                "satisfaction_level": "Satisfaction élevée",
+                "level_color": "#2ecc71",
+                "level_icon": "🟡",
+                "level_num": 3,
+                "vigilance": "Faible à modérée",
+                "attention": "Soignée",
+                "conseil": (
+                    "Accueil chaleureux et fluide. Valoriser la qualité de l'expérience. "
+                    "S'assurer de la clarté des informations à l'arrivée."
+                ),
+            }
+        elif score >= 6.0:
+            return {
+                "satisfaction_level": "Satisfaction moyenne",
+                "level_color": "orange",
+                "level_icon": "🟠",
+                "level_num": 2,
+                "vigilance": "Modérée",
+                "attention": "Renforcée",
+                "conseil": (
+                    "Veiller à la clarté des informations, à la fluidité de l'arrivée "
+                    "et au confort perçu. Anticiper les besoins potentiels."
+                ),
+            }
+        else:
+            return {
+                "satisfaction_level": "Satisfaction fragile",
+                "level_color": "red",
+                "level_icon": "🔴",
+                "level_num": 1,
+                "vigilance": "Élevée",
+                "attention": "Très attentive",
+                "conseil": (
+                    "Anticiper les besoins et prévoir une prise en charge proactive "
+                    "dès l'arrivée. Soigner chaque étape du séjour."
+                ),
+            }
+
+    @staticmethod
+    def _generate_receptionist_message(score: float, client_dict: dict) -> str:
+        """
+        Génère un message professionnel, bienveillant et exploitable pour la réception.
+        Le message est orienté qualité de service — jamais discriminatoire.
+        """
+        if score >= 9.0:
+            base = (
+                "Client à fort potentiel de satisfaction. "
+                "Accueil chaleureux recommandé et mise en valeur de la qualité "
+                "de l'expérience dès le check-in. Proposer une présentation "
+                "soignée des services de l'hôtel."
+            )
+        elif score >= 7.5:
+            base = (
+                "Client à bon potentiel de satisfaction. "
+                "Maintenir un accueil soigné et s'assurer de la fluidité "
+                "des procédures d'arrivée. Veiller à communiquer clairement "
+                "les informations pratiques."
+            )
+        elif score >= 6.0:
+            base = (
+                "Accueil recommandé : attentionné et rassurant. "
+                "Veiller à une prise en charge fluide à l'arrivée "
+                "et à une information claire sur les services de l'hôtel. "
+                "Anticiper les questions fréquentes."
+            )
+        else:
+            base = (
+                "Prévoir une attention particulière à la clarté des explications "
+                "et au confort perçu lors de l'arrivée. "
+                "Anticiper les besoins du client et assurer un suivi "
+                "attentif durant le séjour."
+            )
+
+        extras = []
+        stay = client_dict.get("stay_length", 0) or 0
+        lead = client_dict.get("lead_time_days", 0) or 0
+        enfants = client_dict.get("enfants", 0) or 0
+        adultes = client_dict.get("adultes", 0) or 0
+        month = client_dict.get("arrival_month")
+
+        if stay >= 5:
+            extras.append(
+                f"Séjour prolongé ({stay:.0f} nuits) : "
+                "proposer les services adaptés et veiller au confort dans la durée"
+            )
+        elif stay == 1:
+            extras.append(
+                "Séjour d'une nuit : check-in et check-out efficaces, "
+                "informations essentielles bien communiquées"
+            )
+        if lead == 0:
+            extras.append(
+                "Réservation de dernière minute : "
+                "accueil rapide et efficace, anticiper les attentes immédiates"
+            )
+        elif lead > 60:
+            extras.append(
+                f"Réservation planifiée ({lead:.0f} jours à l'avance) : "
+                "maintenir les attentes et confirmer les détails du séjour"
+            )
+        if enfants > 0:
+            extras.append(
+                "Famille avec enfants : "
+                "veiller à la convivialité, signaler les équipements famille"
+            )
+        if adultes >= 3:
+            extras.append(
+                "Groupe de plusieurs adultes : "
+                "coordonner les chambres et informations pratiques de groupe"
+            )
+        if month in (12, 1, 2):
+            extras.append("Arrivée en période hivernale : confort thermique à soigner")
+        elif month in (7, 8):
+            extras.append("Arrivée en haute saison : gérer l'attente avec fluidité")
+
+        if extras:
+            base += "\n\n⚑ Points d'attention : " + " — ".join(extras) + "."
+
+        return base
+
+    @staticmethod
+    def _generate_probable_reviews(score: float, client_dict: dict) -> List[str]:
+        """
+        Génère des phrases d'avis probables basées sur le score prédit
+        et les caractéristiques du client.
+        """
+        channel = client_dict.get("channel_group", "")
+        stay = client_dict.get("stay_length", 0) or 0
+        enfants = client_dict.get("enfants", 0) or 0
+
+        if score >= 9.0:
+            base_phrases = [
+                "L'accueil a été excellent et l'équipe très professionnelle.",
+                "La localisation est idéale et le confort de la chambre irréprochable.",
+                "Un séjour très satisfaisant, que je recommande vivement.",
+                "L'hôtel répond parfaitement aux attentes, très bon rapport qualité/prix.",
+            ]
+        elif score >= 7.5:
+            base_phrases = [
+                "L'accueil a été agréable et la localisation très pratique.",
+                "Le séjour s'est passé dans de bonnes conditions, personnel attentionné.",
+                "Bonne expérience globale, hôtel bien situé près de la gare.",
+                "Chambre propre et confortable, équipe réactive.",
+            ]
+        elif score >= 6.0:
+            base_phrases = [
+                "Le séjour était convenable, avec quelques points d'amélioration possibles.",
+                "La localisation est un point fort, mais certains aspects pourraient être améliorés.",
+                "Séjour correct dans l'ensemble, accueil standard.",
+                "L'hôtel remplit sa fonction, mais l'expérience pourrait être plus personnalisée.",
+            ]
+        else:
+            base_phrases = [
+                "Le séjour ne correspondait pas tout à fait aux attentes initiales.",
+                "Des améliorations seraient souhaitables, notamment sur l'accueil et le confort.",
+                "Expérience en deçà des espérances, certains aspects méritent attention.",
+            ]
+
+        # Ajustements contextuels
+        if stay >= 5:
+            base_phrases.append(
+                f"Pour un séjour de {stay:.0f} nuits, la qualité des services "
+                "sur la durée est un élément clé."
+            )
+        if enfants > 0:
+            base_phrases.append(
+                "L'hôtel convient aux familles, les équipements dédiés "
+                "sont appréciés."
+            )
+        if channel and "direct" in str(channel).lower():
+            base_phrases.append(
+                "La réservation directe a permis une communication fluide avant l'arrivée."
+            )
+
+        return base_phrases[:4]
+
+    def _get_prediction_factors(self, row: dict) -> dict:
+        """
+        Identifie les facteurs favorables et les points de vigilance
+        basés sur les valeurs fournies et l'importance des features.
+        """
+        favorable = []
+        vigilance_pts = []
+
+        if self.feature_importances is not None:
+            top_features = self.feature_importances.head(8)["feature"].tolist()
+        else:
+            top_features = list(row.keys())[:8]
+
+        for feat in top_features:
+            val = row.get(feat)
+            if val is None or (isinstance(val, float) and np.isnan(val)):
+                vigilance_pts.append(f"`{feat}` non renseigné (valeur manquante)")
+                continue
+
+            # Heuristiques métier
+            if feat == "stay_length":
+                if val >= 3:
+                    favorable.append(f"Durée de séjour de {val:.0f} nuits (signal positif)")
+                elif val == 1:
+                    vigilance_pts.append("Séjour d'une nuit (satisfaction plus difficile à fidéliser)")
+            elif feat == "lead_time_days":
+                if val > 30:
+                    favorable.append(f"Réservation anticipée ({val:.0f} j) — attentes gérables")
+                elif val == 0:
+                    vigilance_pts.append("Réservation last-minute (attentes à cadrer rapidement)")
+            elif feat == "adultes":
+                if val >= 3:
+                    vigilance_pts.append(f"Groupe de {val:.0f} adultes — coordination requise")
+            elif feat == "enfants":
+                if val > 0:
+                    vigilance_pts.append(f"Famille avec {val:.0f} enfant(s) — attentes spécifiques")
+
+        return {"favorable": favorable, "vigilance": vigilance_pts}
+
+    def predict_single(self, client_dict: dict) -> dict:
+        """
+        Prédit la satisfaction pour un seul nouveau client/séjour.
+
+        Le modèle doit avoir été entraîné au préalable (appel à train()).
+        Les valeurs manquantes sont gérées automatiquement (remplacement par 0).
+        Les catégories inconnues sont ramenées à "unknown" ou 0.
+
+        Args:
+            client_dict: Dictionnaire {nom_feature: valeur}.
+                         Les clés ne correspondant pas aux features du modèle
+                         sont ignorées silencieusement.
+
+        Returns:
+            Dictionnaire structuré avec :
+                - prediction        : valeur prédite (0/1 ou float)
+                - probability       : probabilité de haute satisfaction
+                - score             : score 0-10 interprétable
+                - satisfaction_level: libellé textuel du niveau
+                - level_icon        : emoji indicateur
+                - level_num         : rang 1-4
+                - vigilance         : niveau de vigilance recommandé
+                - attention         : niveau d'attention requis
+                - conseil           : conseil synthétique
+                - receptionist_msg  : message professionnel pour la réception
+                - probable_reviews  : liste de phrases d'avis probables
+                - feature_factors   : dict {favorable, vigilance} des facteurs
+                - features_used     : dict des features fournies
+                - n_features_provided, n_features_total : couverture de features
+        """
+        if self.model is None:
+            raise ValueError(
+                "Le modèle n'a pas été entraîné. Appelez .train() d'abord."
+            )
+        if not self.feature_names:
+            raise ValueError(
+                "Aucune feature connue. Le modèle doit être entraîné via .prepare_features()."
+            )
+
+        # 1. Construire la ligne avec toutes les features attendues (NaN par défaut)
+        row: dict = {feat: np.nan for feat in self.feature_names}
+
+        # 2. Remplir avec les valeurs fournies (uniquement les features connues)
+        for key, val in client_dict.items():
+            if key in row:
+                row[key] = val
+
+        # 3. Encoder les catégorielles
+        row = self._encode_single_categoricals(row)
+
+        # 4. Remplir les NaN restants avec 0
+        for feat in self.feature_names:
+            if feat not in row or (isinstance(row[feat], float) and np.isnan(row[feat])):
+                row[feat] = 0
+
+        # 5. Construire le DataFrame de prédiction
+        X_single = pd.DataFrame([row])[self.feature_names].fillna(0)
+
+        # 6. Mettre à l'échelle
+        X_scaled = self.scaler.transform(X_single)
+
+        # 7. Prédire
+        if self.task == "classification":
+            pred_val = int(self.model.predict(X_scaled)[0])
+            prob_high: Optional[float] = None
+            if hasattr(self.model, "predict_proba"):
+                proba = self.model.predict_proba(X_scaled)[0]
+                prob_high = float(proba[1]) if len(proba) > 1 else float(proba[0])
+            # Score 0-10 interprétable
+            score = (prob_high * 10) if prob_high is not None else (8.5 if pred_val == 1 else 5.0)
+        else:
+            score_raw = float(self.model.predict(X_scaled)[0])
+            score = max(0.0, min(10.0, score_raw))
+            pred_val = 1 if score >= 8 else 0
+            prob_high = score / 10.0
+
+        # 8. Niveaux et interprétations
+        level_info = self._get_satisfaction_level(score)
+        receptionist_msg = self._generate_receptionist_message(score, client_dict)
+        probable_reviews = self._generate_probable_reviews(score, client_dict)
+        feature_factors = self._get_prediction_factors(row)
+
+        n_provided = sum(
+            1 for k in client_dict
+            if k in self.feature_names and client_dict[k] is not None
+        )
+
+        return {
+            "prediction": pred_val,
+            "probability": round(prob_high, 4) if prob_high is not None else None,
+            "score": round(score, 2),
+            **level_info,
+            "receptionist_msg": receptionist_msg,
+            "probable_reviews": probable_reviews,
+            "feature_factors": feature_factors,
+            "features_used": {k: v for k, v in client_dict.items()},
+            "n_features_provided": n_provided,
+            "n_features_total": len(self.feature_names),
+        }
 
     # ------------------------------------------------------------------
     # Accesseurs
